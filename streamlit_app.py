@@ -230,7 +230,7 @@ class SECBulkDataMonitor:
         all_filings = []
         cik_to_ticker = self.get_company_tickers_mapping()
         
-        # Get filings from multiple days
+        # Try daily index method first
         for day_offset in range(days_back):
             if len(all_filings) >= max_filings:
                 break
@@ -252,11 +252,96 @@ class SECBulkDataMonitor:
             # Respect rate limits
             time.sleep(0.2)
         
-        # Limit to max_filings
-        limited_filings = all_filings[:max_filings]
+        # If daily index method didn't work well, try fallback RSS method with higher limits
+        if len(all_filings) < 50:  # If we got very few filings, try fallback
+            logger.info("Daily index method returned few results, trying RSS fallback...")
+            rss_filings = self.get_rss_fallback_filings(days_back, max_filings)
+            if rss_filings:
+                all_filings.extend(rss_filings)
+                logger.info(f"RSS fallback found {len(rss_filings)} additional filings")
         
-        logger.info(f"Total bulk filings retrieved: {len(limited_filings)}")
-        return limited_filings
+        # Remove duplicates and limit to max_filings
+        seen = set()
+        unique_filings = []
+        for filing in all_filings:
+            key = (filing.get('cik', ''), filing.get('title', ''))
+            if key not in seen and len(unique_filings) < max_filings:
+                seen.add(key)
+                unique_filings.append(filing)
+        
+        logger.info(f"Total bulk filings retrieved: {len(unique_filings)}")
+        return unique_filings
+    
+    def get_rss_fallback_filings(self, days_back: int, max_filings: int) -> List[Dict]:
+        """Fallback RSS method if daily index files don't work"""
+        logger.info("Using RSS fallback method...")
+        
+        try:
+            import feedparser
+            
+            # Use the RSS endpoint
+            rss_url = "https://www.sec.gov/cgi-bin/browse-edgar"
+            params = {
+                'action': 'getcurrent',
+                'type': '8-K',
+                'output': 'atom',
+                'count': min(max_filings, 1000)
+            }
+            
+            response = self._make_request(rss_url, params)
+            if not response:
+                return []
+            
+            # Parse RSS feed
+            feed = feedparser.parse(response.content)
+            filings = []
+            
+            if hasattr(feed, 'entries'):
+                logger.info(f"RSS fallback found {len(feed.entries)} entries")
+                
+                cutoff_date = datetime.now() - timedelta(days=days_back)
+                
+                for entry in feed.entries:
+                    # Parse entry date
+                    entry_date = datetime.now()  # Default to now
+                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                        try:
+                            entry_date = datetime(*entry.published_parsed[:6])
+                        except:
+                            pass
+                    
+                    if entry_date < cutoff_date:
+                        continue
+                    
+                    # Extract company info
+                    title = getattr(entry, 'title', '')
+                    if '8-K' not in title.upper():
+                        continue
+                    
+                    company_match = re.search(r'8-K\s*(?:/A)?\s*-\s*(.+?)\s*\(([^)]+)\)', title, re.IGNORECASE)
+                    if company_match:
+                        company_name = company_match.group(1).strip()
+                        cik_info = company_match.group(2)
+                        cik_match = re.search(r'\b(\d{10})\b', cik_info)
+                        cik = cik_match.group(1) if cik_match else ""
+                        
+                        filing = {
+                            'title': title,
+                            'company_name': company_name,
+                            'cik': cik,
+                            'ticker': '',  # Will be filled later if needed
+                            'filing_url': getattr(entry, 'link', ''),
+                            'published': entry_date.isoformat(),
+                            'form_type': '8-K',
+                            'summary': getattr(entry, 'summary', '')
+                        }
+                        filings.append(filing)
+            
+            return filings
+            
+        except Exception as e:
+            logger.error(f"RSS fallback failed: {e}")
+            return []
     
     def get_daily_index_filings(self, target_date: datetime, cik_to_ticker: Dict[str, str]) -> List[Dict]:
         """Get 8-K filings from SEC daily index for specific date"""
@@ -290,71 +375,163 @@ class SECBulkDataMonitor:
         filings = []
         lines = index_content.split('\n')
         
-        # Skip header lines and find data section
+        logger.debug(f"Parsing index file with {len(lines)} lines")
+        
+        # Log first few lines to understand format
+        if self.debug_mode and len(lines) > 10:
+            logger.debug("First 10 lines of index file:")
+            for i, line in enumerate(lines[:10]):
+                logger.debug(f"Line {i}: {line}")
+        
+        # Look for different possible formats
         data_started = False
-        header_patterns = ['Form Type', 'Company Name', 'CIK', 'Date Filed', 'File Name']
+        found_8k_count = 0
         
         for line_num, line in enumerate(lines):
+            original_line = line
             line = line.strip()
             
             # Skip empty lines
             if not line:
                 continue
+            
+            # Skip header lines (usually first 10-15 lines)
+            if line_num < 15 and any(header in line.upper() for header in ['FORM TYPE', 'COMPANY NAME', 'CIK', 'DATE FILED', 'FILE NAME', '----']):
+                continue
                 
-            # Skip obvious header/separator lines
-            if any(pattern in line for pattern in ['----', 'Form Type', 'Company Name']) and not data_started:
-                continue
+            # Check if this looks like a data line
+            # Format can be: pipe-delimited OR space-delimited OR tab-delimited
             
-            # Look for data lines (should have 4+ pipe separators)
-            pipe_count = line.count('|')
-            if pipe_count >= 4:
-                data_started = True
-            elif not data_started:
-                continue
-            
-            # Parse pipe-delimited format
-            try:
+            # Try pipe-delimited first (most common)
+            if '|' in line:
                 parts = [part.strip() for part in line.split('|')]
-                
-                if len(parts) >= 5:
+                if len(parts) >= 4:
                     form_type = parts[0]
-                    company_name = parts[1]
-                    cik_raw = parts[2]
-                    date_filed = parts[3]
-                    filename = parts[4]
-                    
-                    # Clean and validate CIK
-                    cik_clean = re.sub(r'[^\d]', '', cik_raw)
-                    if len(cik_clean) <= 10:
-                        cik = cik_clean.zfill(10)
-                    else:
-                        logger.debug(f"Invalid CIK format: {cik_raw}")
-                        continue
-                    
-                    # Only process 8-K filings
                     if form_type.upper() in ['8-K', '8-K/A']:
-                        filing_url = f"{self.sec_base}/Archives/{filename}"
-                        ticker = cik_to_ticker.get(cik, '')
-                        
-                        filing = {
-                            'title': f"{form_type} - {company_name} ({cik}) (Filer)",
-                            'company_name': company_name,
-                            'cik': cik,
-                            'ticker': ticker,
-                            'filing_url': filing_url,
-                            'published': filing_date.isoformat(),
-                            'form_type': form_type,
-                            'filename': filename,
-                            'date_filed': date_filed
-                        }
+                        found_8k_count += 1
+                        filing = self._parse_pipe_delimited_line(parts, filing_date, cik_to_ticker)
+                        if filing:
+                            filings.append(filing)
+                            
+            # Try space/tab delimited format
+            elif any(form in line.upper() for form in ['8-K ', '8-K\t']):
+                # Split on multiple spaces or tabs
+                parts = re.split(r'\s{2,}|\t+', line)
+                if len(parts) >= 4:
+                    found_8k_count += 1
+                    filing = self._parse_space_delimited_line(parts, filing_date, cik_to_ticker)
+                    if filing:
                         filings.append(filing)
                         
-            except Exception as e:
-                logger.debug(f"Error parsing line {line_num}: {line[:50]}... - Error: {e}")
-                continue
+            # Try fixed-width format (sometimes used)
+            elif line.upper().startswith('8-K') or '8-K' in line[:20]:
+                found_8k_count += 1
+                filing = self._parse_fixed_width_line(line, filing_date, cik_to_ticker)
+                if filing:
+                    filings.append(filing)
         
-        logger.debug(f"Parsed {len(filings)} 8-K filings from daily index")
+        logger.debug(f"Found {found_8k_count} potential 8-K lines, parsed {len(filings)} valid filings")
+        
+        # If we found 8-K mentions but no valid filings, log some examples
+        if found_8k_count > 0 and len(filings) == 0 and self.debug_mode:
+            logger.debug("Found 8-K mentions but no valid filings. Sample lines with 8-K:")
+            count = 0
+            for line in lines:
+                if '8-K' in line.upper() and count < 3:
+                    logger.debug(f"Sample 8-K line: {line}")
+                    count += 1
+        
         return filings
+    
+    def _parse_pipe_delimited_line(self, parts: List[str], filing_date: datetime, cik_to_ticker: Dict[str, str]) -> Optional[Dict]:
+        """Parse pipe-delimited format line"""
+        try:
+            if len(parts) >= 5:
+                form_type = parts[0]
+                company_name = parts[1]
+                cik_raw = parts[2]
+                date_filed = parts[3]
+                filename = parts[4]
+                
+                # Clean CIK
+                cik_clean = re.sub(r'[^\d]', '', cik_raw)
+                if cik_clean and len(cik_clean) <= 10:
+                    cik = cik_clean.zfill(10)
+                    ticker = cik_to_ticker.get(cik, '')
+                    
+                    return {
+                        'title': f"{form_type} - {company_name} ({cik}) (Filer)",
+                        'company_name': company_name,
+                        'cik': cik,
+                        'ticker': ticker,
+                        'filing_url': f"{self.sec_base}/Archives/{filename}",
+                        'published': filing_date.isoformat(),
+                        'form_type': form_type,
+                        'filename': filename,
+                        'date_filed': date_filed
+                    }
+        except Exception as e:
+            logger.debug(f"Error parsing pipe-delimited line: {e}")
+        return None
+    
+    def _parse_space_delimited_line(self, parts: List[str], filing_date: datetime, cik_to_ticker: Dict[str, str]) -> Optional[Dict]:
+        """Parse space-delimited format line"""
+        try:
+            if len(parts) >= 4:
+                form_type = parts[0]
+                company_name = parts[1]
+                cik_raw = parts[2] if len(parts) > 2 else ""
+                filename = parts[-1]  # Usually last part
+                
+                # Clean CIK
+                cik_clean = re.sub(r'[^\d]', '', cik_raw)
+                if cik_clean and len(cik_clean) <= 10:
+                    cik = cik_clean.zfill(10)
+                    ticker = cik_to_ticker.get(cik, '')
+                    
+                    return {
+                        'title': f"{form_type} - {company_name} ({cik}) (Filer)",
+                        'company_name': company_name,
+                        'cik': cik,
+                        'ticker': ticker,
+                        'filing_url': f"{self.sec_base}/Archives/{filename}",
+                        'published': filing_date.isoformat(),
+                        'form_type': form_type,
+                        'filename': filename
+                    }
+        except Exception as e:
+            logger.debug(f"Error parsing space-delimited line: {e}")
+        return None
+    
+    def _parse_fixed_width_line(self, line: str, filing_date: datetime, cik_to_ticker: Dict[str, str]) -> Optional[Dict]:
+        """Parse fixed-width format line"""
+        try:
+            # Common fixed-width format positions
+            if len(line) > 80:
+                form_type = line[:12].strip()
+                company_name = line[12:62].strip()
+                cik_raw = line[62:72].strip()
+                filename = line[72:].strip()
+                
+                # Clean CIK
+                cik_clean = re.sub(r'[^\d]', '', cik_raw)
+                if cik_clean and len(cik_clean) <= 10:
+                    cik = cik_clean.zfill(10)
+                    ticker = cik_to_ticker.get(cik, '')
+                    
+                    return {
+                        'title': f"{form_type} - {company_name} ({cik}) (Filer)",
+                        'company_name': company_name,
+                        'cik': cik,
+                        'ticker': ticker,
+                        'filing_url': f"{self.sec_base}/Archives/{filename}",
+                        'published': filing_date.isoformat(),
+                        'form_type': form_type,
+                        'filename': filename
+                    }
+        except Exception as e:
+            logger.debug(f"Error parsing fixed-width line: {e}")
+        return None
     
     def analyze_8k_content(self, filing_url: str) -> Optional[str]:
         """Download and extract text content from 8-K filing"""
