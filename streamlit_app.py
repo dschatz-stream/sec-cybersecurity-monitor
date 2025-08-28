@@ -14,6 +14,13 @@ import logging
 import traceback
 from io import StringIO
 
+# Try to import dateutil, fallback if not available
+try:
+    from dateutil import parser as date_parser
+    DATEUTIL_AVAILABLE = True
+except ImportError:
+    DATEUTIL_AVAILABLE = False
+
 # Custom logging handler for Streamlit
 class StreamlitLogHandler(logging.Handler):
     def __init__(self):
@@ -224,20 +231,52 @@ class ProductionEdgarMonitor:
                 try:
                     logger.debug(f"Processing entry {i+1}: {getattr(entry, 'title', 'No title')}")
                     
-                    # Parse entry date
+                    # Parse entry date - try multiple date fields and formats
                     entry_date = None
-                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                        try:
-                            entry_date = datetime(*entry.published_parsed[:6])
-                        except:
-                            logger.debug(f"Could not parse published date for entry {i+1}")
                     
+                    # Try different date fields
+                    date_fields = ['published_parsed', 'updated_parsed', 'created_parsed']
+                    for date_field in date_fields:
+                        if hasattr(entry, date_field) and getattr(entry, date_field):
+                            try:
+                                entry_date = datetime(*getattr(entry, date_field)[:6])
+                                logger.debug(f"Entry {i+1} date from {date_field}: {entry_date}")
+                                break
+                            except Exception as e:
+                                logger.debug(f"Failed to parse {date_field} for entry {i+1}: {e}")
+                    
+                    # Try parsing string dates if structured dates fail
                     if not entry_date:
-                        logger.debug(f"Skipping entry {i+1} - no valid date")
+                        string_date_fields = ['published', 'updated', 'created']
+                        for date_field in string_date_fields:
+                            if hasattr(entry, date_field):
+                                date_str = getattr(entry, date_field)
+                                logger.debug(f"Trying to parse string date from {date_field}: {date_str}")
+                                try:
+                                    # Try parsing ISO format date
+                                    if 'T' in str(date_str):
+                                        entry_date = datetime.fromisoformat(str(date_str).replace('Z', '+00:00').replace('-04:00', '').replace('-05:00', ''))
+                                    elif DATEUTIL_AVAILABLE:
+                                        # Try parsing other common formats with dateutil
+                                        entry_date = date_parser.parse(str(date_str))
+                                    logger.debug(f"Successfully parsed date: {entry_date}")
+                                    break
+                                except Exception as e:
+                                    logger.debug(f"Failed to parse {date_field} string for entry {i+1}: {e}")
+                    
+                    # If still no date, use current date (assume recent filings are from today)
+                    if not entry_date:
+                        logger.debug(f"No date found for entry {i+1}, assuming recent filing - using current date")
+                        entry_date = datetime.now()
+                    
+                    logger.debug(f"Final entry date for {i+1}: {entry_date}")
+                    
+                    if entry_date < cutoff_date:
+                        logger.debug(f"Entry {i+1} too old: {entry_date} < {cutoff_date}")
                         continue
                     
                     if entry_date < cutoff_date:
-                        logger.debug(f"Entry {i+1} too old: {entry_date}")
+                        logger.debug(f"Entry {i+1} too old: {entry_date} < {cutoff_date}")
                         continue
                     
                     # Extract company info from title
@@ -246,7 +285,7 @@ class ProductionEdgarMonitor:
                         logger.debug(f"Entry {i+1} not an 8-K: {title}")
                         continue
                     
-                    company_match = re.search(r'8-K\s*-\s*(.+?)\s*\(([^)]+)\)', title, re.IGNORECASE)
+                    company_match = re.search(r'8-K\s*(?:/A)?\s*-\s*(.+?)\s*\(([^)]+)\)', title, re.IGNORECASE)
                     if company_match:
                         company_name = company_match.group(1).strip()
                         cik_info = company_match.group(2)
@@ -268,6 +307,8 @@ class ProductionEdgarMonitor:
                         
                 except Exception as e:
                     logger.error(f"Error processing entry {i+1}: {str(e)}")
+                    if self.debug_mode:
+                        logger.error(f"Entry details: {vars(entry) if hasattr(entry, '__dict__') else entry}")
             
             logger.info(f"Processed {len(filings)} valid 8-K filings")
             return filings
