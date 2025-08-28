@@ -824,6 +824,13 @@ def main():
         help="How many days back to scan"
     )
     
+    max_filings = st.sidebar.selectbox(
+        "Maximum Filings to Analyze",
+        [100, 200, 500, 1000, "All Available"],
+        index=1,
+        help="Limit number of filings to process (higher = slower but more comprehensive)"
+    )
+    
     min_confidence = st.sidebar.slider(
         "Minimum Confidence Score",
         min_value=0.1,
