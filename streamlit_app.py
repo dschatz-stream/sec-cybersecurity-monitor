@@ -189,97 +189,94 @@ class ProductionEdgarMonitor:
                 
         return None
     
-    def get_recent_8k_filings_comprehensive(self, days_back: int = 7) -> List[Dict]:
+    def get_recent_8k_filings_comprehensive(self, days_back: int = 7, max_filings: int = 1000) -> List[Dict]:
         """Get more comprehensive 8-K filings using multiple methods"""
-        logger.info(f"Starting comprehensive 8-K fetch for last {days_back} days")
+        logger.info(f"Starting comprehensive 8-K fetch for last {days_back} days, max {max_filings} filings")
         
         all_filings = []
         
-        # Method 1: RSS Feed (most recent ~100)
-        logger.info("Method 1: Fetching from RSS feed...")
-        rss_filings = self.get_recent_8k_filings_rss_unlimited(days_back)
+        # Method 1: RSS Feed with higher limits
+        logger.info("Method 1: Fetching from RSS feed with higher limits...")
+        rss_filings = self.get_recent_8k_filings_rss_unlimited(days_back, max_filings)
         all_filings.extend(rss_filings)
         logger.info(f"RSS method found {len(rss_filings)} filings")
         
-        # Method 2: Daily RSS feeds (if we need more)
-        if days_back > 3:  # For longer periods, try daily feeds
-            logger.info("Method 2: Fetching daily RSS feeds...")
-            daily_filings = self.get_daily_rss_filings(days_back)
-            all_filings.extend(daily_filings)
-            logger.info(f"Daily RSS method found {len(daily_filings)} additional filings")
+        # If we still need more filings and have more days to search
+        if len(all_filings) < max_filings and days_back > 3:
+            logger.info("Method 2: Trying additional RSS requests...")
+            additional_filings = self.get_additional_rss_filings(days_back, max_filings - len(all_filings))
+            all_filings.extend(additional_filings)
+            logger.info(f"Additional requests found {len(additional_filings)} more filings")
         
-        # Remove duplicates based on CIK + filing date
+        # Remove duplicates based on CIK + title
         seen = set()
         unique_filings = []
         for filing in all_filings:
-            key = (filing.get('cik', ''), filing.get('published', ''), filing.get('title', ''))
-            if key not in seen:
+            key = (filing.get('cik', ''), filing.get('title', ''))
+            if key not in seen and len(unique_filings) < max_filings:
                 seen.add(key)
                 unique_filings.append(filing)
         
         logger.info(f"Total unique filings after deduplication: {len(unique_filings)}")
         return unique_filings
     
-    def get_recent_8k_filings_rss_unlimited(self, days_back: int = 7) -> List[Dict]:
+    def get_recent_8k_filings_rss_unlimited(self, days_back: int = 7, max_count: int = 1000) -> List[Dict]:
         """Enhanced RSS method with higher limits"""
-        logger.info(f"Starting unlimited RSS feed fetch for last {days_back} days")
+        logger.info(f"Starting unlimited RSS feed fetch - requesting {max_count} entries")
         
-        # Use higher count and try multiple requests if needed
-        max_count = min(1000, days_back * 50)  # Much higher limit
+        # SEC RSS endpoint with much higher count
         params = {
             'action': 'getcurrent',
             'type': '8-K',
             'output': 'atom',
-            'count': max_count
+            'count': max_count  # Use the actual requested count
         }
+        
+        logger.info(f"Making request with params: {params}")
         
         response = self._make_request(self.edgar_rss, params)
         if not response:
             logger.error("Failed to get RSS response")
             return []
         
-        logger.info(f"Received {len(response.content)} bytes from RSS feed (requesting {max_count} entries)")
+        logger.info(f"Received {len(response.content)} bytes from RSS feed")
         
-        # Log first 500 chars for debugging
-        content_preview = response.text[:500] if response.text else "No text content"
-        logger.debug(f"Response preview: {content_preview}")
-        
+        # Parse and process the response
         return self._process_rss_feed(response, days_back)
     
-    def get_daily_rss_filings(self, days_back: int) -> List[Dict]:
-        """Try to get more filings by checking daily archives"""
-        logger.info(f"Fetching daily RSS feeds for {days_back} days")
+    def get_additional_rss_filings(self, days_back: int, remaining_count: int) -> List[Dict]:
+        """Try additional requests to get more filings"""
+        logger.info(f"Trying to get {remaining_count} additional filings")
         
-        all_filings = []
+        additional_filings = []
         
-        # Try different RSS endpoints for more coverage
-        rss_endpoints = [
-            'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&output=atom&count=200',
-            'https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip',  # Alternative
-        ]
-        
-        for i in range(min(days_back, 7)):  # Limit to 7 days to avoid too many requests
-            date = datetime.now() - timedelta(days=i)
+        # Try different count parameters to see if we can get more
+        for count_attempt in [500, 750, 1000, 1500, 2000]:
+            if len(additional_filings) >= remaining_count:
+                break
+                
+            logger.info(f"Trying request with count={count_attempt}")
             
-            # Try date-specific RSS (if available)
-            date_params = {
+            params = {
                 'action': 'getcurrent',
-                'type': '8-K', 
+                'type': '8-K',
                 'output': 'atom',
-                'count': 200,
-                'date': date.strftime('%Y-%m-%d')
+                'count': count_attempt
             }
             
-            response = self._make_request(self.edgar_rss, date_params)
+            response = self._make_request(self.edgar_rss, params)
             if response:
-                filings = self._process_rss_feed(response, 1)  # Just today
-                logger.info(f"Date {date.strftime('%Y-%m-%d')}: found {len(filings)} filings")
-                all_filings.extend(filings)
+                filings = self._process_rss_feed(response, days_back)
+                logger.info(f"Count={count_attempt} returned {len(filings)} filings")
+                
+                # If this gives us significantly more, use it
+                if len(filings) > len(additional_filings):
+                    additional_filings = filings
+                    logger.info(f"Using this batch - {len(filings)} filings")
             
-            # Rate limiting
-            time.sleep(0.2)
+            time.sleep(0.2)  # Rate limiting
         
-        return all_filings
+        return additional_filings[:remaining_count]
     
     def _process_rss_feed(self, response, days_back: int) -> List[Dict]:
         """Process RSS feed response into filing data"""
@@ -727,10 +724,11 @@ class ProductionEdgarMonitor:
             'debug_mode': self.debug_mode
         }
     
-    def monitor_cybersecurity_incidents(self, days_back: int = 7, use_rss: bool = True) -> List[CyberIncident]:
+    def monitor_cybersecurity_incidents(self, days_back: int = 7, max_filings: int = 1000) -> List[CyberIncident]:
         """Main monitoring function with comprehensive filing collection"""
         logger.info(f"=== Starting cybersecurity monitoring ===")
         logger.info(f"Monitoring period: {days_back} days")
+        logger.info(f"Maximum filings: {max_filings}")
         logger.info(f"Debug mode: {self.debug_mode}")
         
         # Clear previous API responses
@@ -738,7 +736,7 @@ class ProductionEdgarMonitor:
         
         # Get recent 8-K filings using comprehensive method
         logger.info("Fetching recent 8-K filings with comprehensive method...")
-        filings = self.get_recent_8k_filings_comprehensive(days_back)
+        filings = self.get_recent_8k_filings_comprehensive(days_back, max_filings)
         
         if not filings:
             logger.error("❌ No filings retrieved from SEC")
@@ -873,7 +871,8 @@ def main():
         
         # Run monitoring
         with st.spinner("Scanning SEC filings..."):
-            incidents = monitor.monitor_cybersecurity_incidents(days_back, use_rss=True)
+            max_filings_value = 9999 if max_filings == "All Available" else int(max_filings)
+            incidents = monitor.monitor_cybersecurity_incidents(days_back, max_filings_value)
         
         # Show API communication log
         if debug_mode:
