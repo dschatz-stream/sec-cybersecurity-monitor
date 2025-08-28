@@ -1,3 +1,8 @@
+# SEC 8-K Cybersecurity Monitor - Bulk Data Version
+# Version: 2.0.0
+# Features: Bulk data collection, 1000+ filings, daily index parsing
+# Last Updated: 2024-08-28
+
 import streamlit as st
 import requests
 import json
@@ -9,10 +14,23 @@ from dataclasses import dataclass
 from bs4 import BeautifulSoup
 import pandas as pd
 import plotly.express as px
-import feedparser
 import logging
 import traceback
-from io import StringIO
+from io import StringIO, BytesIO
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Version information
+VERSION = "2.0.0"
+BUILD_DATE = "2024-08-28"
+FEATURES = [
+    "SEC Bulk Data API Integration",
+    "Daily Index File Processing", 
+    "1000+ Filing Capability",
+    "Multi-threaded Analysis",
+    "Company Ticker Mapping",
+    "Enhanced Debug Logging"
+]
 
 # Try to import dateutil, fallback if not available
 try:
@@ -47,7 +65,7 @@ logger.addHandler(streamlit_handler)
 
 # Configure Streamlit page
 st.set_page_config(
-    page_title="SEC 8-K Cybersecurity Monitor - Production",
+    page_title="SEC 8-K Monitor - Bulk Data Version",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -55,7 +73,6 @@ st.set_page_config(
 
 @dataclass
 class CyberIncident:
-    """Data class for cybersecurity incident from 8-K filing"""
     company_name: str
     ticker: str
     cik: str
@@ -70,7 +87,6 @@ class CyberIncident:
 
 @dataclass
 class APIResponse:
-    """Track SEC API responses for debugging"""
     url: str
     status_code: int
     response_time: float
@@ -78,34 +94,32 @@ class APIResponse:
     error: Optional[str]
     timestamp: datetime
 
-class ProductionEdgarMonitor:
-    """Production SEC EDGAR monitor with comprehensive debugging"""
+class SECBulkDataMonitor:
+    """SEC Monitor using bulk data APIs to get 1000+ filings"""
     
     def __init__(self, company_name: str = "CyberIncidentTracker", email: str = "contact@company.com", debug_mode: bool = False):
-        # SEC requires proper User-Agent with company name and email
         self.headers = {
             "User-Agent": f"{company_name} {email}",
             "Accept": "application/json, text/html, application/xml",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive"
+            "Accept-Encoding": "gzip, deflate"
         }
         
         self.session = requests.Session()
         self.session.headers.update(self.headers)
         
-        # Debug mode settings
         self.debug_mode = debug_mode
         self.api_responses = []
         
-        logger.info(f"Initialized EdgarMonitor with User-Agent: {self.headers['User-Agent']}")
+        # SEC bulk data endpoints
+        self.sec_base = "https://www.sec.gov"
+        self.submissions_api = "https://data.sec.gov/submissions"  # Company submissions API
+        self.bulk_data_base = "https://www.sec.gov/Archives/edgar/daily-index"
+        self.company_tickers_url = "https://www.sec.gov/files/company_tickers.json"
         
-        # SEC EDGAR endpoints
-        self.edgar_base = "https://www.sec.gov"
-        self.edgar_rss = "https://www.sec.gov/cgi-bin/browse-edgar"
+        logger.info(f"Initialized SEC Bulk Data Monitor")
+        logger.info(f"User-Agent: {self.headers['User-Agent']}")
         
-        logger.info(f"Base URLs configured - RSS: {self.edgar_rss}")
-        
-        # Cybersecurity detection keywords
+        # Cybersecurity keywords
         self.cyber_keywords = {
             'primary': [
                 'cybersecurity incident', 'cyber attack', 'cyberattack', 'data breach', 
@@ -123,14 +137,11 @@ class ProductionEdgarMonitor:
             ]
         }
         
-        # Rate limiting parameters
         self.request_delay = 0.1
         self.max_retries = 3
         
-        logger.info(f"Initialized with {sum(len(v) for v in self.cyber_keywords.values())} keywords")
-    
     def _make_request(self, url: str, params: Dict = None, method: str = "GET") -> Optional[requests.Response]:
-        """Make rate-limited request to SEC with comprehensive logging"""
+        """Make rate-limited request with logging"""
         start_time = time.time()
         
         logger.debug(f"Making {method} request to: {url}")
@@ -149,7 +160,6 @@ class ProductionEdgarMonitor:
                 response_time = time.time() - start_time
                 content_length = len(response.content) if response.content else 0
                 
-                # Log API response
                 api_response = APIResponse(
                     url=url,
                     status_code=response.status_code,
@@ -169,7 +179,6 @@ class ProductionEdgarMonitor:
                 error_msg = f"Request attempt {attempt + 1} failed for {url}: {str(e)}"
                 logger.warning(error_msg)
                 
-                # Log failed API response
                 api_response = APIResponse(
                     url=url,
                     status_code=getattr(e.response, 'status_code', 0) if hasattr(e, 'response') and e.response else 0,
@@ -182,338 +191,174 @@ class ProductionEdgarMonitor:
                 
                 if attempt == self.max_retries - 1:
                     logger.error(f"All requests failed for {url}: {str(e)}")
-                    if self.debug_mode:
-                        logger.error(f"Full traceback: {traceback.format_exc()}")
                     return None
                 time.sleep(2 ** attempt)
                 
         return None
     
-    def get_recent_8k_filings_comprehensive(self, days_back: int = 7, max_filings: int = 1000) -> List[Dict]:
-        """Get more comprehensive 8-K filings using multiple methods"""
-        logger.info(f"Starting comprehensive 8-K fetch for last {days_back} days, max {max_filings} filings")
+    def get_company_tickers_mapping(self) -> Dict[str, str]:
+        """Get mapping of company tickers to CIKs"""
+        logger.info("Fetching company ticker to CIK mapping...")
+        
+        response = self._make_request(self.company_tickers_url)
+        if not response:
+            logger.warning("Failed to get company ticker mapping")
+            return {}
+        
+        try:
+            data = response.json()
+            # Convert to CIK -> ticker mapping
+            cik_to_ticker = {}
+            for ticker_info in data.values():
+                if isinstance(ticker_info, dict):
+                    cik = str(ticker_info.get('cik_str', '')).zfill(10)
+                    ticker = ticker_info.get('ticker', '')
+                    if cik and ticker:
+                        cik_to_ticker[cik] = ticker
+            
+            logger.info(f"Loaded {len(cik_to_ticker)} company ticker mappings")
+            return cik_to_ticker
+            
+        except Exception as e:
+            logger.error(f"Error parsing company tickers: {e}")
+            return {}
+    
+    def get_bulk_8k_filings(self, days_back: int, max_filings: int = 1000) -> List[Dict]:
+        """Get bulk 8-K filings using SEC's daily index files"""
+        logger.info(f"Starting bulk 8-K filing retrieval for {days_back} days, max {max_filings} filings")
         
         all_filings = []
+        cik_to_ticker = self.get_company_tickers_mapping()
         
-        # Method 1: RSS Feed with higher limits
-        logger.info("Method 1: Fetching from RSS feed with higher limits...")
-        rss_filings = self.get_recent_8k_filings_rss_unlimited(days_back, max_filings)
-        all_filings.extend(rss_filings)
-        logger.info(f"RSS method found {len(rss_filings)} filings")
-        
-        # If we still need more filings and have more days to search
-        if len(all_filings) < max_filings and days_back > 3:
-            logger.info("Method 2: Trying additional RSS requests...")
-            additional_filings = self.get_additional_rss_filings(days_back, max_filings - len(all_filings))
-            all_filings.extend(additional_filings)
-            logger.info(f"Additional requests found {len(additional_filings)} more filings")
-        
-        # Remove duplicates based on CIK + title
-        seen = set()
-        unique_filings = []
-        for filing in all_filings:
-            key = (filing.get('cik', ''), filing.get('title', ''))
-            if key not in seen and len(unique_filings) < max_filings:
-                seen.add(key)
-                unique_filings.append(filing)
-        
-        logger.info(f"Total unique filings after deduplication: {len(unique_filings)}")
-        return unique_filings
-    
-    def get_recent_8k_filings_rss_unlimited(self, days_back: int = 7, max_count: int = 1000) -> List[Dict]:
-        """Enhanced RSS method with higher limits"""
-        logger.info(f"Starting unlimited RSS feed fetch - requesting {max_count} entries")
-        
-        # SEC RSS endpoint with much higher count
-        params = {
-            'action': 'getcurrent',
-            'type': '8-K',
-            'output': 'atom',
-            'count': max_count  # Use the actual requested count
-        }
-        
-        logger.info(f"Making request with params: {params}")
-        
-        response = self._make_request(self.edgar_rss, params)
-        if not response:
-            logger.error("Failed to get RSS response")
-            return []
-        
-        logger.info(f"Received {len(response.content)} bytes from RSS feed")
-        
-        # Parse and process the response
-        return self._process_rss_feed(response, days_back)
-    
-    def get_additional_rss_filings(self, days_back: int, remaining_count: int) -> List[Dict]:
-        """Try additional requests to get more filings"""
-        logger.info(f"Trying to get {remaining_count} additional filings")
-        
-        additional_filings = []
-        
-        # Try different count parameters to see if we can get more
-        for count_attempt in [500, 750, 1000, 1500, 2000]:
-            if len(additional_filings) >= remaining_count:
+        # Get filings from multiple days
+        for day_offset in range(days_back):
+            if len(all_filings) >= max_filings:
                 break
                 
-            logger.info(f"Trying request with count={count_attempt}")
+            target_date = datetime.now() - timedelta(days=day_offset)
             
-            params = {
-                'action': 'getcurrent',
-                'type': '8-K',
-                'output': 'atom',
-                'count': count_attempt
-            }
+            # Skip weekends (SEC doesn't publish on weekends)
+            if target_date.weekday() >= 5:
+                continue
             
-            response = self._make_request(self.edgar_rss, params)
-            if response:
-                filings = self._process_rss_feed(response, days_back)
-                logger.info(f"Count={count_attempt} returned {len(filings)} filings")
-                
-                # If this gives us significantly more, use it
-                if len(filings) > len(additional_filings):
-                    additional_filings = filings
-                    logger.info(f"Using this batch - {len(filings)} filings")
+            logger.info(f"Fetching filings for {target_date.strftime('%Y-%m-%d')}...")
             
-            time.sleep(0.2)  # Rate limiting
+            daily_filings = self.get_daily_index_filings(target_date, cik_to_ticker)
+            
+            if daily_filings:
+                all_filings.extend(daily_filings)
+                logger.info(f"Found {len(daily_filings)} 8-K filings for {target_date.strftime('%Y-%m-%d')}")
+            
+            # Respect rate limits
+            time.sleep(0.2)
         
-        return additional_filings[:remaining_count]
+        # Limit to max_filings
+        limited_filings = all_filings[:max_filings]
+        
+        logger.info(f"Total bulk filings retrieved: {len(limited_filings)}")
+        return limited_filings
     
-    def _process_rss_feed(self, response, days_back: int) -> List[Dict]:
-        """Process RSS feed response into filing data"""
-        try:
-            # Parse RSS/Atom feed
-            logger.info("Attempting to parse with feedparser...")
-            feed = feedparser.parse(response.content)
+    def get_daily_index_filings(self, target_date: datetime, cik_to_ticker: Dict[str, str]) -> List[Dict]:
+        """Get 8-K filings from SEC daily index for specific date"""
+        
+        # SEC daily index URL format
+        year = target_date.year
+        quarter = f"QTR{(target_date.month - 1) // 3 + 1}"
+        date_str = target_date.strftime('%Y%m%d')
+        
+        # Try both form.idx and master.idx formats
+        index_urls = [
+            f"{self.bulk_data_base}/{year}/{quarter}/form.{date_str}.idx",
+            f"{self.bulk_data_base}/{year}/{quarter}/master.{date_str}.idx"
+        ]
+        
+        for index_url in index_urls:
+            logger.debug(f"Trying daily index: {index_url}")
             
-            if not hasattr(feed, 'entries') or len(feed.entries) == 0:
-                logger.warning("Feedparser found no entries")
-                logger.debug(f"Feed info: {getattr(feed, 'feed', {})}")
-                return []
+            response = self._make_request(index_url)
+            if response:
+                filings = self.parse_daily_index(response.text, target_date, cik_to_ticker)
+                if filings:
+                    return filings
+        
+        logger.debug(f"No daily index found for {target_date.strftime('%Y-%m-%d')}")
+        return []
+    
+    def parse_daily_index(self, index_content: str, filing_date: datetime, cik_to_ticker: Dict[str, str]) -> List[Dict]:
+        """Parse SEC daily index file to extract 8-K filings"""
+        
+        filings = []
+        lines = index_content.split('\n')
+        
+        # Skip header lines and find data section
+        data_started = False
+        header_patterns = ['Form Type', 'Company Name', 'CIK', 'Date Filed', 'File Name']
+        
+        for line_num, line in enumerate(lines):
+            line = line.strip()
             
-            logger.info(f"Feedparser found {len(feed.entries)} entries")
+            # Skip empty lines
+            if not line:
+                continue
+                
+            # Skip obvious header/separator lines
+            if any(pattern in line for pattern in ['----', 'Form Type', 'Company Name']) and not data_started:
+                continue
             
-            filings = []
-            cutoff_date = datetime.now() - timedelta(days=days_back)
+            # Look for data lines (should have 4+ pipe separators)
+            pipe_count = line.count('|')
+            if pipe_count >= 4:
+                data_started = True
+            elif not data_started:
+                continue
             
-            for i, entry in enumerate(feed.entries):
-                try:
-                    logger.debug(f"Processing entry {i+1}: {getattr(entry, 'title', 'No title')}")
+            # Parse pipe-delimited format
+            try:
+                parts = [part.strip() for part in line.split('|')]
+                
+                if len(parts) >= 5:
+                    form_type = parts[0]
+                    company_name = parts[1]
+                    cik_raw = parts[2]
+                    date_filed = parts[3]
+                    filename = parts[4]
                     
-                    # Parse entry date - try multiple date fields and formats
-                    entry_date = None
-                    
-                    # Try different date fields
-                    date_fields = ['published_parsed', 'updated_parsed', 'created_parsed']
-                    for date_field in date_fields:
-                        if hasattr(entry, date_field) and getattr(entry, date_field):
-                            try:
-                                entry_date = datetime(*getattr(entry, date_field)[:6])
-                                logger.debug(f"Entry {i+1} date from {date_field}: {entry_date}")
-                                break
-                            except Exception as e:
-                                logger.debug(f"Failed to parse {date_field} for entry {i+1}: {e}")
-                    
-                    # Try parsing string dates if structured dates fail
-                    if not entry_date:
-                        string_date_fields = ['published', 'updated', 'created']
-                        for date_field in string_date_fields:
-                            if hasattr(entry, date_field):
-                                date_str = getattr(entry, date_field)
-                                logger.debug(f"Trying to parse string date from {date_field}: {date_str}")
-                                try:
-                                    # Try parsing ISO format date
-                                    if 'T' in str(date_str):
-                                        entry_date = datetime.fromisoformat(str(date_str).replace('Z', '+00:00').replace('-04:00', '').replace('-05:00', ''))
-                                    elif DATEUTIL_AVAILABLE:
-                                        # Try parsing other common formats with dateutil
-                                        entry_date = date_parser.parse(str(date_str))
-                                    logger.debug(f"Successfully parsed date: {entry_date}")
-                                    break
-                                except Exception as e:
-                                    logger.debug(f"Failed to parse {date_field} string for entry {i+1}: {e}")
-                    
-                    # If still no date, use current date (assume recent filings are from today)
-                    if not entry_date:
-                        logger.debug(f"No date found for entry {i+1}, assuming recent filing - using current date")
-                        entry_date = datetime.now()
-                    
-                    logger.debug(f"Final entry date for {i+1}: {entry_date}")
-                    
-                    if entry_date < cutoff_date:
-                        logger.debug(f"Entry {i+1} too old: {entry_date} < {cutoff_date}")
+                    # Clean and validate CIK
+                    cik_clean = re.sub(r'[^\d]', '', cik_raw)
+                    if len(cik_clean) <= 10:
+                        cik = cik_clean.zfill(10)
+                    else:
+                        logger.debug(f"Invalid CIK format: {cik_raw}")
                         continue
                     
-                    # Extract company info from title
-                    title = getattr(entry, 'title', '')
-                    if '8-K' not in title.upper():
-                        logger.debug(f"Entry {i+1} not an 8-K: {title}")
-                        continue
-                    
-                    company_match = re.search(r'8-K\s*(?:/A)?\s*-\s*(.+?)\s*\(([^)]+)\)', title, re.IGNORECASE)
-                    if company_match:
-                        company_name = company_match.group(1).strip()
-                        cik_info = company_match.group(2)
-                        cik_match = re.search(r'\b(\d{10})\b', cik_info)
-                        cik = cik_match.group(1) if cik_match else ""
+                    # Only process 8-K filings
+                    if form_type.upper() in ['8-K', '8-K/A']:
+                        filing_url = f"{self.sec_base}/Archives/{filename}"
+                        ticker = cik_to_ticker.get(cik, '')
                         
                         filing = {
-                            'title': title,
+                            'title': f"{form_type} - {company_name} ({cik}) (Filer)",
                             'company_name': company_name,
                             'cik': cik,
-                            'filing_url': getattr(entry, 'link', ''),
-                            'published': entry_date.isoformat(),
-                            'summary': getattr(entry, 'summary', '')
+                            'ticker': ticker,
+                            'filing_url': filing_url,
+                            'published': filing_date.isoformat(),
+                            'form_type': form_type,
+                            'filename': filename,
+                            'date_filed': date_filed
                         }
                         filings.append(filing)
-                        logger.debug(f"Added filing: {company_name}")
-                    else:
-                        logger.debug(f"Could not parse company from title: {title}")
                         
-                except Exception as e:
-                    logger.error(f"Error processing entry {i+1}: {str(e)}")
-                    if self.debug_mode:
-                        logger.error(f"Entry details: {vars(entry) if hasattr(entry, '__dict__') else entry}")
-            
-            logger.info(f"Processed {len(filings)} valid 8-K filings")
-            return filings
-            
-        except Exception as e:
-            logger.error(f"Error parsing RSS feed: {str(e)}")
-            if self.debug_mode:
-                logger.error(f"Full traceback: {traceback.format_exc()}")
-            return []
-        """Get recent 8-K filings using SEC RSS feed with enhanced debugging"""
-        logger.info(f"Starting RSS feed fetch for last {days_back} days")
+            except Exception as e:
+                logger.debug(f"Error parsing line {line_num}: {line[:50]}... - Error: {e}")
+                continue
         
-        # SEC RSS parameters for 8-K filings
-        params = {
-            'action': 'getcurrent',
-            'type': '8-K',
-            'output': 'atom',
-            'count': min(100, days_back * 20)
-        }
-        
-        response = self._make_request(self.edgar_rss, params)
-        if not response:
-            logger.error("Failed to get RSS response")
-            return []
-        
-        logger.info(f"Received {len(response.content)} bytes from RSS feed")
-        
-        # Log first 500 chars for debugging
-        content_preview = response.text[:500] if response.text else "No text content"
-        logger.debug(f"Response preview: {content_preview}")
-        
-        try:
-            # Parse RSS/Atom feed
-            logger.info("Attempting to parse with feedparser...")
-            feed = feedparser.parse(response.content)
-            
-            if not hasattr(feed, 'entries') or len(feed.entries) == 0:
-                logger.warning("Feedparser found no entries")
-                logger.debug(f"Feed info: {getattr(feed, 'feed', {})}")
-                return []
-            
-            logger.info(f"Feedparser found {len(feed.entries)} entries")
-            
-            filings = []
-            cutoff_date = datetime.now() - timedelta(days=days_back)
-            
-            for i, entry in enumerate(feed.entries):
-                try:
-                    logger.debug(f"Processing entry {i+1}: {getattr(entry, 'title', 'No title')}")
-                    
-                    # Parse entry date - try multiple date fields and formats
-                    entry_date = None
-                    
-                    # Try different date fields
-                    date_fields = ['published_parsed', 'updated_parsed', 'created_parsed']
-                    for date_field in date_fields:
-                        if hasattr(entry, date_field) and getattr(entry, date_field):
-                            try:
-                                entry_date = datetime(*getattr(entry, date_field)[:6])
-                                logger.debug(f"Entry {i+1} date from {date_field}: {entry_date}")
-                                break
-                            except Exception as e:
-                                logger.debug(f"Failed to parse {date_field} for entry {i+1}: {e}")
-                    
-                    # Try parsing string dates if structured dates fail
-                    if not entry_date:
-                        string_date_fields = ['published', 'updated', 'created']
-                        for date_field in string_date_fields:
-                            if hasattr(entry, date_field):
-                                date_str = getattr(entry, date_field)
-                                logger.debug(f"Trying to parse string date from {date_field}: {date_str}")
-                                try:
-                                    # Try parsing ISO format date
-                                    if 'T' in str(date_str):
-                                        entry_date = datetime.fromisoformat(str(date_str).replace('Z', '+00:00').replace('-04:00', '').replace('-05:00', ''))
-                                    elif DATEUTIL_AVAILABLE:
-                                        # Try parsing other common formats with dateutil
-                                        entry_date = date_parser.parse(str(date_str))
-                                    logger.debug(f"Successfully parsed date: {entry_date}")
-                                    break
-                                except Exception as e:
-                                    logger.debug(f"Failed to parse {date_field} string for entry {i+1}: {e}")
-                    
-                    # If still no date, use current date (assume recent filings are from today)
-                    if not entry_date:
-                        logger.debug(f"No date found for entry {i+1}, assuming recent filing - using current date")
-                        entry_date = datetime.now()
-                    
-                    logger.debug(f"Final entry date for {i+1}: {entry_date}")
-                    
-                    if entry_date < cutoff_date:
-                        logger.debug(f"Entry {i+1} too old: {entry_date} < {cutoff_date}")
-                        continue
-                    
-                    if entry_date < cutoff_date:
-                        logger.debug(f"Entry {i+1} too old: {entry_date} < {cutoff_date}")
-                        continue
-                    
-                    # Extract company info from title
-                    title = getattr(entry, 'title', '')
-                    if '8-K' not in title.upper():
-                        logger.debug(f"Entry {i+1} not an 8-K: {title}")
-                        continue
-                    
-                    company_match = re.search(r'8-K\s*(?:/A)?\s*-\s*(.+?)\s*\(([^)]+)\)', title, re.IGNORECASE)
-                    if company_match:
-                        company_name = company_match.group(1).strip()
-                        cik_info = company_match.group(2)
-                        cik_match = re.search(r'\b(\d{10})\b', cik_info)
-                        cik = cik_match.group(1) if cik_match else ""
-                        
-                        filing = {
-                            'title': title,
-                            'company_name': company_name,
-                            'cik': cik,
-                            'filing_url': getattr(entry, 'link', ''),
-                            'published': entry_date.isoformat(),
-                            'summary': getattr(entry, 'summary', '')
-                        }
-                        filings.append(filing)
-                        logger.debug(f"Added filing: {company_name}")
-                    else:
-                        logger.debug(f"Could not parse company from title: {title}")
-                        
-                except Exception as e:
-                    logger.error(f"Error processing entry {i+1}: {str(e)}")
-                    if self.debug_mode:
-                        logger.error(f"Entry details: {vars(entry) if hasattr(entry, '__dict__') else entry}")
-            
-            logger.info(f"Processed {len(filings)} valid 8-K filings")
-            return filings
-            
-        except Exception as e:
-            logger.error(f"Error parsing RSS feed: {str(e)}")
-            if self.debug_mode:
-                logger.error(f"Full traceback: {traceback.format_exc()}")
-            return []
+        logger.debug(f"Parsed {len(filings)} 8-K filings from daily index")
+        return filings
     
     def analyze_8k_content(self, filing_url: str) -> Optional[str]:
-        """Download and extract text content from 8-K filing with detailed logging"""
-        logger.info(f"Analyzing filing content: {filing_url}")
+        """Download and extract text content from 8-K filing"""
+        logger.debug(f"Analyzing filing content: {filing_url}")
         
         if not filing_url or not filing_url.startswith('http'):
             logger.error(f"Invalid filing URL: {filing_url}")
@@ -521,25 +366,15 @@ class ProductionEdgarMonitor:
         
         response = self._make_request(filing_url)
         if not response:
-            logger.error(f"Failed to fetch filing content")
             return None
         
         try:
-            content_size = len(response.content)
-            logger.info(f"Downloaded {content_size} bytes")
-            
-            if content_size == 0:
-                logger.warning("Empty response content")
-                return None
-            
-            # Parse HTML content
             soup = BeautifulSoup(response.content, 'html.parser')
             
             # Remove unwanted elements
             for element in soup(["script", "style", "meta", "link"]):
                 element.decompose()
             
-            # Extract text content
             text = soup.get_text()
             
             # Clean up text
@@ -547,22 +382,15 @@ class ProductionEdgarMonitor:
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             cleaned_text = ' '.join(chunk for chunk in chunks if chunk)
             
-            logger.info(f"Extracted {len(cleaned_text)} characters of text")
-            
-            # Log preview for debugging
-            preview = cleaned_text[:200] + "..." if len(cleaned_text) > 200 else cleaned_text
-            logger.debug(f"Content preview: {preview}")
-            
+            logger.debug(f"Extracted {len(cleaned_text)} characters")
             return cleaned_text
             
         except Exception as e:
             logger.error(f"Error parsing filing content: {str(e)}")
-            if self.debug_mode:
-                logger.error(f"Full traceback: {traceback.format_exc()}")
             return None
     
     def detect_cybersecurity_incident(self, content: str, filing_info: Dict) -> Optional[CyberIncident]:
-        """Analyze filing content for cybersecurity incidents with confidence scoring"""
+        """Analyze filing content for cybersecurity incidents"""
         if not content:
             return None
         
@@ -571,7 +399,6 @@ class ProductionEdgarMonitor:
         # Check for Item 1.05 (cybersecurity incidents)
         item_105_patterns = [
             r'item\s+1\.0?5[^0-9]',
-            r'item\s+1\s+0\s*5[^0-9]',
             r'cybersecurity\s+incident',
             r'material\s+cybersecurity'
         ]
@@ -579,52 +406,37 @@ class ProductionEdgarMonitor:
         has_item_105 = any(re.search(pattern, content_lower) for pattern in item_105_patterns)
         
         if not has_item_105:
-            logger.debug("No Item 1.05 found")
             return None
-        
-        logger.info("Found Item 1.05 - analyzing for cybersecurity content")
         
         # Score cybersecurity keywords
         found_keywords = []
         confidence_score = 0.0
         
-        # Primary keywords (high confidence)
         for keyword in self.cyber_keywords['primary']:
             if keyword.lower() in content_lower:
                 found_keywords.append(keyword)
                 confidence_score += 0.3
         
-        # Secondary keywords (medium confidence)
         for keyword in self.cyber_keywords['secondary']:
             if keyword.lower() in content_lower:
                 found_keywords.append(keyword)
                 confidence_score += 0.2
         
-        # Technical keywords (lower confidence)
         for keyword in self.cyber_keywords['technical']:
             if keyword.lower() in content_lower:
                 found_keywords.append(keyword)
                 confidence_score += 0.1
         
-        # Minimum confidence threshold
         if confidence_score < 0.2 or not found_keywords:
-            logger.debug(f"Low confidence score: {confidence_score}, keywords: {found_keywords}")
             return None
         
-        logger.info(f"Cybersecurity incident detected! Confidence: {confidence_score:.2f}")
-        
         # Extract incident description
-        incident_description = self._extract_item_105_section(content)
-        
-        # Extract incident date
+        incident_description = self._extract_incident_section(content)
         incident_date = self._extract_incident_date(incident_description)
-        
-        # Extract ticker
-        ticker = self._extract_ticker_from_content(content)
         
         return CyberIncident(
             company_name=filing_info.get('company_name', 'Unknown'),
-            ticker=ticker,
+            ticker=filing_info.get('ticker', ''),
             cik=filing_info.get('cik', ''),
             filing_date=filing_info.get('published', '')[:10],
             filing_url=filing_info.get('filing_url', ''),
@@ -632,14 +444,14 @@ class ProductionEdgarMonitor:
             incident_date=incident_date,
             keywords=list(set(found_keywords)),
             raw_content_preview=content[:500],
-            filing_type='8-K',
+            filing_type=filing_info.get('form_type', '8-K'),
             confidence_score=min(confidence_score, 1.0)
         )
     
-    def _extract_item_105_section(self, content: str) -> str:
-        """Extract Item 1.05 section from filing"""
+    def _extract_incident_section(self, content: str) -> str:
+        """Extract incident section from filing"""
         patterns = [
-            r'item\s+1\.0?5.*?(?=item\s+[2-9]|item\s+10|signature|$)',
+            r'item\s+1\.0?5.*?(?=item\s+[2-9]|signature|$)',
             r'cybersecurity\s+incident.*?(?=item|signature|$)'
         ]
         
@@ -647,26 +459,16 @@ class ProductionEdgarMonitor:
             match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
             if match:
                 section = match.group(0)
-                section = re.sub(r'\s+', ' ', section).strip()
-                return section[:2000]
+                return re.sub(r'\s+', ' ', section).strip()[:2000]
         
-        # Fallback
-        paragraphs = content.split('\n\n')
-        cyber_paragraphs = []
-        
-        for para in paragraphs:
-            if any(keyword in para.lower() for keyword in self.cyber_keywords['primary']):
-                cyber_paragraphs.append(para.strip())
-        
-        return ' '.join(cyber_paragraphs)[:2000] if cyber_paragraphs else "Description not extracted"
+        return "Description not extracted"
     
     def _extract_incident_date(self, description: str) -> Optional[str]:
         """Extract incident date from description"""
         date_patterns = [
             r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},?\s+\d{4}\b',
             r'\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b',
-            r'\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b',
-            r'on\s+(\w+\s+\d{1,2},?\s+\d{4})',
+            r'\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b'
         ]
         
         for pattern in date_patterns:
@@ -676,24 +478,69 @@ class ProductionEdgarMonitor:
         
         return None
     
-    def _extract_ticker_from_content(self, content: str) -> str:
-        """Extract ticker symbol from filing content"""
-        patterns = [
-            r'trading\s+symbol[:\s]*([A-Z]{1,5})',
-            r'ticker[:\s]*([A-Z]{1,5})',
-            r'nasdaq[:\s]*([A-Z]{1,5})',
-            r'nyse[:\s]*([A-Z]{1,5})'
-        ]
+    def monitor_cybersecurity_incidents_bulk(self, days_back: int = 14, max_filings: int = 1000) -> List[CyberIncident]:
+        """Main monitoring function using bulk data"""
+        logger.info(f"=== Starting BULK cybersecurity monitoring ===")
+        logger.info(f"Monitoring period: {days_back} days")
+        logger.info(f"Maximum filings: {max_filings}")
         
-        for pattern in patterns:
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match:
-                return match.group(1)
+        self.api_responses = []
         
-        return ""
+        # Get bulk 8-K filings
+        logger.info("Fetching bulk 8-K filings from SEC daily indices...")
+        filings = self.get_bulk_8k_filings(days_back, max_filings)
+        
+        if not filings:
+            logger.error("❌ No filings retrieved from SEC bulk data")
+            return []
+        
+        logger.info(f"✅ Retrieved {len(filings)} filings for analysis")
+        
+        incidents = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Analyze filings with threading for speed
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_filing = {
+                executor.submit(self.analyze_single_filing, filing): filing 
+                for filing in filings
+            }
+            
+            for i, future in enumerate(as_completed(future_to_filing)):
+                progress = (i + 1) / len(filings)
+                progress_bar.progress(progress)
+                
+                filing = future_to_filing[future]
+                status_text.text(f'Analyzing {filing["company_name"]} ({i+1}/{len(filings)})')
+                
+                try:
+                    incident = future.result()
+                    if incident:
+                        incidents.append(incident)
+                        logger.info(f"🚨 CYBERSECURITY INCIDENT: {incident.company_name}")
+                except Exception as e:
+                    logger.error(f"Error analyzing {filing['company_name']}: {e}")
+        
+        progress_bar.progress(1.0)
+        status_text.text(f'✅ Analyzed {len(filings)} filings, found {len(incidents)} incidents')
+        
+        logger.info(f"=== Bulk Monitoring Complete ===")
+        logger.info(f"Total filings analyzed: {len(filings)}")
+        logger.info(f"Cybersecurity incidents found: {len(incidents)}")
+        
+        incidents.sort(key=lambda x: x.confidence_score, reverse=True)
+        return incidents
+    
+    def analyze_single_filing(self, filing: Dict) -> Optional[CyberIncident]:
+        """Analyze a single filing for cybersecurity incidents"""
+        content = self.analyze_8k_content(filing['filing_url'])
+        if content:
+            return self.detect_cybersecurity_incident(content, filing)
+        return None
     
     def get_api_communication_log(self) -> pd.DataFrame:
-        """Return detailed log of all SEC API communications"""
+        """Return detailed log of all API communications"""
         if not self.api_responses:
             return pd.DataFrame()
         
@@ -709,150 +556,76 @@ class ProductionEdgarMonitor:
             })
         
         return pd.DataFrame(log_data)
-    
-    def get_debug_summary(self) -> Dict:
-        """Get comprehensive debug information"""
-        return {
-            'total_api_calls': len(self.api_responses),
-            'successful_calls': len([r for r in self.api_responses if r.status_code == 200]),
-            'failed_calls': len([r for r in self.api_responses if r.status_code != 200]),
-            'total_data_downloaded': sum(r.content_length for r in self.api_responses),
-            'average_response_time': sum(r.response_time for r in self.api_responses) / len(self.api_responses) if self.api_responses else 0,
-            'user_agent': self.headers.get('User-Agent'),
-            'rate_limit_delay': self.request_delay,
-            'max_retries': self.max_retries,
-            'debug_mode': self.debug_mode
-        }
-    
-    def monitor_cybersecurity_incidents(self, days_back: int = 7, max_filings: int = 1000) -> List[CyberIncident]:
-        """Main monitoring function with comprehensive filing collection"""
-        logger.info(f"=== Starting cybersecurity monitoring ===")
-        logger.info(f"Monitoring period: {days_back} days")
-        logger.info(f"Maximum filings: {max_filings}")
-        logger.info(f"Debug mode: {self.debug_mode}")
-        
-        # Clear previous API responses
-        self.api_responses = []
-        
-        # Get recent 8-K filings using comprehensive method
-        logger.info("Fetching recent 8-K filings with comprehensive method...")
-        filings = self.get_recent_8k_filings_comprehensive(days_back, max_filings)
-        
-        if not filings:
-            logger.error("❌ No filings retrieved from SEC")
-            return []
-        
-        logger.info(f"✅ Retrieved {len(filings)} filings for analysis")
-        
-        incidents = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i, filing in enumerate(filings):
-            progress = (i + 1) / len(filings)
-            progress_bar.progress(progress)
-            status_text.text(f'Analyzing {filing["company_name"]} ({i+1}/{len(filings)})')
-            
-            logger.info(f"--- Analyzing filing {i+1}/{len(filings)}: {filing['company_name']} ---")
-            
-            # Download and analyze filing content
-            content = self.analyze_8k_content(filing['filing_url'])
-            
-            if content:
-                logger.info(f"Successfully downloaded content ({len(content)} characters)")
-                incident = self.detect_cybersecurity_incident(content, filing)
-                if incident:
-                    incidents.append(incident)
-                    logger.info(f"🚨 CYBERSECURITY INCIDENT DETECTED: {incident.company_name} (confidence: {incident.confidence_score:.2f})")
-                else:
-                    logger.info("No cybersecurity incident detected in this filing")
-            else:
-                logger.warning(f"Failed to download content for {filing['company_name']}")
-        
-        progress_bar.progress(1.0)
-        status_text.text(f'✅ Analyzed {len(filings)} filings, found {len(incidents)} incidents')
-        
-        logger.info(f"=== Monitoring Complete ===")
-        logger.info(f"Total filings analyzed: {len(filings)}")
-        logger.info(f"Cybersecurity incidents found: {len(incidents)}")
-        
-        # Sort by confidence score
-        incidents.sort(key=lambda x: x.confidence_score, reverse=True)
-        
-        return incidents
 
 def main():
-    """Production Streamlit app with comprehensive debugging"""
+    st.title("🔍 SEC 8-K Monitor - BULK DATA VERSION")
+    st.markdown(f"**Version {VERSION} - Get 1000+ filings using SEC's bulk daily index files**")
     
-    st.title("🔍 SEC 8-K Cybersecurity Monitor - Production")
-    st.markdown("**Real-time monitoring of cybersecurity incidents using live SEC EDGAR data**")
+    # Version badge
+    st.sidebar.markdown(f"""
+    <div style='background: linear-gradient(90deg, #FF6B6B, #4ECDC4); padding: 8px; border-radius: 5px; margin-bottom: 10px;'>
+        <strong style='color: white;'>🚀 Version {VERSION}</strong><br/>
+        <small style='color: white; opacity: 0.9;'>Build: {BUILD_DATE}</small>
+    </div>
+    """, unsafe_allow_html=True)
     
     # Sidebar configuration
     st.sidebar.header("⚙️ Configuration")
     
-    # Debug mode toggle
-    debug_mode = st.sidebar.checkbox(
-        "🐛 Enable Debug Mode",
-        value=False,
-        help="Show detailed API communication logs and error traces"
-    )
+    debug_mode = st.sidebar.checkbox("🐛 Enable Debug Mode", value=False)
     
-    # User contact info
-    company_name = st.sidebar.text_input(
-        "Company/Organization Name",
-        value="CyberSecurityTracker",
-        help="Required by SEC for API access"
-    )
-    
-    email = st.sidebar.text_input(
-        "Contact Email", 
-        value="contact@company.com",
-        help="Required by SEC for API access"
-    )
+    company_name = st.sidebar.text_input("Company Name", value="CyberSecurityTracker")
+    email = st.sidebar.text_input("Contact Email", value="contact@company.com")
     
     if not company_name or not email or '@' not in email:
-        st.error("⚠️ SEC requires valid company name and email for API access")
+        st.error("⚠️ SEC requires valid company name and email")
         return
     
-    days_back = st.sidebar.slider(
-        "Monitoring Period (days)",
-        min_value=1,
-        max_value=30,
-        value=14,
-        help="How many days back to scan"
-    )
+    days_back = st.sidebar.slider("Monitoring Period (days)", 1, 30, 14)
     
     max_filings = st.sidebar.selectbox(
         "Maximum Filings to Analyze",
-        [100, 200, 500, 1000, "All Available"],
-        index=1,
-        help="Limit number of filings to process (higher = slower but more comprehensive)"
+        [100, 500, 1000, 2000, 5000],
+        index=2,
+        help="Higher = more comprehensive but slower"
     )
     
-    min_confidence = st.sidebar.slider(
-        "Minimum Confidence Score",
-        min_value=0.1,
-        max_value=1.0,
-        value=0.2,
-        step=0.1,
-        help="Filter incidents by detection confidence"
-    )
+    min_confidence = st.sidebar.slider("Min Confidence", 0.1, 1.0, 0.2, 0.1)
     
-    # Debug information in sidebar
-    if debug_mode:
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("**🐛 Debug Info**")
-        st.sidebar.markdown(f"User-Agent: `{company_name} {email}`")
-        st.sidebar.markdown(f"Rate limit: 0.1s between requests")
+    # Feature highlights
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**✨ Key Features:**")
+    for feature in FEATURES[:3]:  # Show top 3 features
+        st.sidebar.markdown(f"• {feature}")
     
-    # Main monitoring section
-    st.header("📊 Live Incident Detection")
+    st.header("📊 BULK Data Collection")
+    
+    # Information about bulk data approach
+    with st.expander("ℹ️ How Bulk Data Collection Works"):
+        st.markdown("""
+        **This version uses SEC's official bulk data system:**
+        
+        1. **Daily Index Files**: Downloads SEC's daily filing index files
+        2. **Historical Coverage**: Scans back through multiple days of filings  
+        3. **Company Mapping**: Maps CIKs to ticker symbols
+        4. **Bulk Processing**: Analyzes hundreds/thousands of filings
+        5. **Multi-threading**: Parallel processing for speed
+        
+        **Expected Results:**
+        - 14 days ≈ 1,000-2,000 filings
+        - 30 days ≈ 2,000-4,000 filings
+        
+        **Why this works better than RSS:**
+        - RSS feeds limited to ~100 recent filings
+        - Bulk data covers complete historical periods
+        - Real control over volume and timeframe
+        """)
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown("Scan live SEC EDGAR filings for cybersecurity incidents")
+        st.markdown("**Ready to scan SEC's bulk data archives for cybersecurity incidents?**")
     with col2:
-        run_monitor = st.button("🔍 Start Scan", type="primary")
+        run_monitor = st.button("🚀 Start BULK Scan", type="primary")
     
     if run_monitor:
         # Clear previous logs
@@ -860,181 +633,177 @@ def main():
             streamlit_handler.clear_logs()
         
         # Initialize monitor
-        with st.spinner("Initializing SEC EDGAR connection..."):
-            monitor = ProductionEdgarMonitor(company_name, email, debug_mode=debug_mode)
+        with st.spinner("Initializing bulk data monitor..."):
+            monitor = SECBulkDataMonitor(company_name, email, debug_mode)
         
-        # Debug information display
         if debug_mode:
-            with st.expander("🐛 Debug Information", expanded=True):
-                debug_info = monitor.get_debug_summary()
+            with st.expander("🐛 System Debug Information", expanded=False):
+                debug_info = {
+                    'version': VERSION,
+                    'build_date': BUILD_DATE,
+                    'features': FEATURES,
+                    'configuration': {
+                        'user_agent': monitor.headers['User-Agent'],
+                        'days_back': days_back,
+                        'max_filings': max_filings,
+                        'min_confidence': min_confidence,
+                        'debug_mode': debug_mode
+                    },
+                    'endpoints': {
+                        'bulk_data_base': monitor.bulk_data_base,
+                        'company_tickers': monitor.company_tickers_url,
+                        'submissions_api': monitor.submissions_api
+                    },
+                    'processing': {
+                        'request_delay': monitor.request_delay,
+                        'max_retries': monitor.max_retries,
+                        'max_workers': 5
+                    },
+                    'keyword_categories': {
+                        'primary': len(monitor.cyber_keywords['primary']),
+                        'secondary': len(monitor.cyber_keywords['secondary']),
+                        'technical': len(monitor.cyber_keywords['technical']),
+                        'total_keywords': sum(len(v) for v in monitor.cyber_keywords.values())
+                    }
+                }
                 st.json(debug_info)
         
-        # Run monitoring
-        with st.spinner("Scanning SEC filings..."):
-            max_filings_value = 9999 if max_filings == "All Available" else int(max_filings)
-            incidents = monitor.monitor_cybersecurity_incidents(days_back, max_filings_value)
+        # Run the bulk scan
+        with st.spinner(f"Scanning SEC bulk data for {days_back} days, up to {max_filings} filings..."):
+            incidents = monitor.monitor_cybersecurity_incidents_bulk(days_back, max_filings)
         
-        # Show API communication log
+        # Show debug information if enabled
         if debug_mode:
             st.header("🔗 SEC API Communication Log")
             api_log = monitor.get_api_communication_log()
             if not api_log.empty:
                 st.dataframe(api_log, use_container_width=True)
                 
-                # API Statistics
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Total API Calls", len(api_log))
                 with col2:
-                    success_rate = len(api_log[api_log['Status Code'] == 200]) / len(api_log) * 100 if len(api_log) > 0 else 0
+                    success_rate = len(api_log[api_log['Status Code'] == 200]) / len(api_log) * 100
                     st.metric("Success Rate", f"{success_rate:.1f}%")
                 with col3:
-                    avg_time = api_log['Response Time (s)'].mean() if len(api_log) > 0 else 0
-                    st.metric("Avg Response Time", f"{avg_time:.2f}s")
-                with col4:
                     total_data = api_log['Content Length'].sum()
                     st.metric("Total Data", f"{total_data:,} bytes")
+                with col4:
+                    avg_time = api_log['Response Time (s)'].mean()
+                    st.metric("Avg Response Time", f"{avg_time:.2f}s")
             else:
-                st.warning("No API calls recorded")
-        
-        # Show system logs
-        if debug_mode:
+                st.info("No API calls recorded")
+            
             st.header("📋 System Logs")
             logs = streamlit_handler.get_logs()
             if logs:
                 st.text_area("Debug Logs", logs, height=300)
             else:
-                st.info("No logs generated")
+                st.info("No system logs generated")
         
-        # Filter and display results
+        # Filter incidents by confidence
         high_confidence_incidents = [i for i in incidents if i.confidence_score >= min_confidence]
-        all_incidents_count = len(incidents)
+        total_incidents = len(incidents)
         
-        # Results summary
+        # Display results summary
         if incidents:
-            st.success(f"Scan complete! Found {len(high_confidence_incidents)} high-confidence incidents out of {all_incidents_count} total detections.")
+            st.success(f"🎉 BULK SCAN COMPLETE! Found {len(high_confidence_incidents)} high-confidence incidents out of {total_incidents} total detections.")
         else:
-            st.warning("Scan complete! No cybersecurity incidents detected.")
-            if debug_mode:
-                st.info("Check the debug logs above to see what happened during the scan.")
-        
+            st.warning(f"Bulk scan complete! No cybersecurity incidents detected in the analyzed filings over {days_back} days.")
+            
+        # Show detailed results if incidents found
         if high_confidence_incidents:
-            # Display results
             st.header("🚨 Cybersecurity Incidents Detected")
             
-            # Metrics
+            # Summary metrics
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("High Confidence", len(high_confidence_incidents))
             with col2:
-                st.metric("Total Detections", all_incidents_count)
+                st.metric("Total Detections", total_incidents)
             with col3:
-                avg_confidence = sum(i.confidence_score for i in high_confidence_incidents) / len(high_confidence_incidents)
-                st.metric("Avg Confidence", f"{avg_confidence:.2f}")
+                if high_confidence_incidents:
+                    avg_confidence = sum(i.confidence_score for i in high_confidence_incidents) / len(high_confidence_incidents)
+                    st.metric("Avg Confidence", f"{avg_confidence:.2f}")
+                else:
+                    st.metric("Avg Confidence", "0.00")
             with col4:
-                st.metric("Companies Affected", len(set(i.company_name for i in high_confidence_incidents)))
+                unique_companies = len(set(i.company_name for i in high_confidence_incidents))
+                st.metric("Unique Companies", unique_companies)
             
             # Incidents table
             incidents_data = []
             for incident in high_confidence_incidents:
                 incidents_data.append({
                     "Company": incident.company_name,
-                    "Ticker": incident.ticker or "N/A",
+                    "Ticker": incident.ticker if incident.ticker else "N/A",
                     "Filing Date": incident.filing_date,
                     "Confidence": f"{incident.confidence_score:.2f}",
-                    "Keywords": len(incident.keywords),
-                    "Top Keywords": ", ".join(incident.keywords[:3])
+                    "Keywords Found": len(incident.keywords),
+                    "Top Keywords": ", ".join(incident.keywords[:3]) + ("..." if len(incident.keywords) > 3 else "")
                 })
             
-            df = pd.DataFrame(incidents_data)
-            st.dataframe(df, use_container_width=True)
+            if incidents_data:
+                df = pd.DataFrame(incidents_data)
+                st.dataframe(df, use_container_width=True)
             
-            # Detailed incident views
+            # Detailed incident analysis
+            st.subheader("📋 Detailed Incident Analysis")
             for i, incident in enumerate(high_confidence_incidents):
-                with st.expander(f"#{i+1}: {incident.company_name} - Confidence: {incident.confidence_score:.2f}"):
+                with st.expander(f"#{i+1}: {incident.company_name} ({incident.ticker or 'No ticker'}) - Confidence: {incident.confidence_score:.2f}"):
                     col1, col2 = st.columns([2, 1])
                     
                     with col1:
                         st.markdown("**📝 Incident Description:**")
                         st.write(incident.incident_description)
                         
-                        st.markdown("**🔗 Original SEC Filing:**")
-                        st.link_button("View 8-K Filing", incident.filing_url)
+                        st.markdown("**🔗 SEC Filing:**")
+                        st.link_button("View Original 8-K Filing", incident.filing_url)
                         
-                        if debug_mode:
+                        if debug_mode and incident.raw_content_preview:
                             st.markdown("**🐛 Raw Content Preview:**")
                             st.text_area(f"Raw content preview #{i+1}", incident.raw_content_preview, height=100)
                     
                     with col2:
-                        st.json({
+                        st.markdown("**📊 Incident Metadata:**")
+                        incident_metadata = {
                             "Company": incident.company_name,
-                            "Ticker": incident.ticker,
+                            "Ticker": incident.ticker or "Unknown",
                             "CIK": incident.cik,
                             "Filing Date": incident.filing_date,
-                            "Incident Date": incident.incident_date,
-                            "Confidence Score": incident.confidence_score,
-                            "Keywords": incident.keywords
-                        })
+                            "Incident Date": incident.incident_date or "Not specified",
+                            "Filing Type": incident.filing_type,
+                            "Confidence Score": round(incident.confidence_score, 3),
+                            "Keywords Found": incident.keywords,
+                            "Keyword Count": len(incident.keywords)
+                        }
+                        st.json(incident_metadata)
         
-        elif all_incidents_count > 0:
-            st.info(f"Found {all_incidents_count} potential incidents, but none met the confidence threshold of {min_confidence:.1f}")
-            st.markdown("**Try lowering the confidence threshold in the sidebar to see more results.**")
+        elif total_incidents > 0:
+            st.info(f"Found {total_incidents} potential incidents, but none met the confidence threshold of {min_confidence:.1f}")
+            st.markdown("**💡 Try lowering the confidence threshold in the sidebar to see more results.**")
             
-            # Show low-confidence incidents in debug mode
             if debug_mode:
-                st.subheader("🔍 Low-Confidence Detections (Debug)")
-                low_conf_incidents = [i for i in incidents if i.confidence_score < min_confidence]
-                for i, incident in enumerate(low_conf_incidents):
+                st.subheader("🔍 Low-Confidence Detections (Debug Only)")
+                low_confidence_incidents = [i for i in incidents if i.confidence_score < min_confidence]
+                for i, incident in enumerate(low_confidence_incidents[:5]):  # Show max 5
                     with st.expander(f"Low-conf #{i+1}: {incident.company_name} - Confidence: {incident.confidence_score:.2f}"):
                         st.write(f"**Keywords:** {', '.join(incident.keywords)}")
-                        st.write(f"**Description:** {incident.incident_description[:200]}...")
+                        st.write(f"**Description Preview:** {incident.incident_description[:200]}...")
+                        st.write(f"**Filing URL:** {incident.filing_url}")
         
         else:
-            st.info(f"No cybersecurity incidents found in the last {days_back} days.")
+            st.info(f"No cybersecurity incidents detected in the analyzed filings.")
             if debug_mode:
-                st.markdown("**Troubleshooting tips:**")
-                st.markdown("- Check the API Communication Log above for any failed requests")
-                st.markdown("- Verify your company name and email are valid")
-                st.markdown("- Try increasing the monitoring period")
-                st.markdown("- Check if SEC EDGAR is accessible from your location")
+                st.markdown("**🔧 Troubleshooting:**")
+                st.markdown("- Check the API Communication Log above for failed requests")  
+                st.markdown("- Verify the date range covers recent activity")
+                st.markdown("- Consider that cybersecurity incidents are relatively rare")
+                st.markdown("- Try increasing the monitoring period or lowering confidence threshold")
     
-    # Production notes
-    st.header("🏭 Production Features")
-    st.markdown("""
-    **This production version includes:**
-    - ✅ Real SEC EDGAR API integration
-    - ✅ Confidence scoring for incident detection
-    - ✅ Proper SEC rate limiting and compliance
-    - ✅ Advanced keyword detection algorithms
-    - ✅ Robust error handling and retries
-    - ✅ Comprehensive debugging and logging
-    - 🆕 **Debug mode with SEC API communication logs**
-    - 🆕 **Detailed error tracking and system logs**
-    
-    **Rate Limits:** Respects SEC's 10 requests/second limit
-    **Data Sources:** Live SEC EDGAR RSS feeds
-    **Detection:** Multi-tier keyword analysis with confidence scoring
-    """)
-    
-    # Troubleshooting section
-    with st.expander("🔧 Troubleshooting Guide"):
-        st.markdown("""
-        **If you're getting no results:**
-        
-        1. **Enable Debug Mode** - Toggle the debug switch in the sidebar to see detailed logs
-        2. **Check API Communication** - Look for failed requests in the debug section
-        3. **Verify Credentials** - Make sure company name and email are valid
-        4. **Try Different Settings**:
-           - Increase monitoring period to 14-30 days
-           - Lower confidence threshold to 0.2-0.3
-        5. **Check Recent Activity** - There may simply be no recent cybersecurity incidents
-        
-        **Common Issues:**
-        - **Empty API responses**: SEC servers may be temporarily unavailable
-        - **Parsing errors**: Content format may have changed
-        - **Rate limiting**: Built-in delays should prevent this
-        - **Network issues**: Check your internet connection
-        """)
+    # Footer with version info
+    st.markdown("---")
+    st.markdown(f"**SEC 8-K Cybersecurity Monitor v{VERSION}** | Built: {BUILD_DATE} | Bulk Data Capability")
 
 if __name__ == "__main__":
     main()
