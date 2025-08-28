@@ -1,7 +1,5 @@
 # SEC 8-K Cybersecurity Monitor - Bulk Data Version
-# Version: 2.0.0
 # Features: Bulk data collection, 1000+ filings, daily index parsing
-# Last Updated: 2024-08-28
 
 import streamlit as st
 import requests
@@ -21,7 +19,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Version information
-VERSION = "2.0.0"
+VERSION = "2.0.12"
 BUILD_DATE = "2024-08-28"
 FEATURES = [
     "SEC Bulk Data API Integration",
@@ -533,12 +531,11 @@ class SECBulkDataMonitor:
             logger.debug(f"Error parsing fixed-width line: {e}")
         return None
     
-    def analyze_8k_content(self, filing_url: str) -> Optional[str]:
-        """Download and extract text content from 8-K filing"""
-        logger.debug(f"Analyzing filing content: {filing_url}")
+    def analyze_8k_content_for_item_105(self, filing_url: str) -> Optional[str]:
+        """Quick check if 8-K contains Item 1.05 before full analysis"""
+        logger.debug(f"Quick Item 1.05 check: {filing_url}")
         
         if not filing_url or not filing_url.startswith('http'):
-            logger.error(f"Invalid filing URL: {filing_url}")
             return None
         
         response = self._make_request(filing_url)
@@ -546,25 +543,63 @@ class SECBulkDataMonitor:
             return None
         
         try:
+            # Quick text extraction - don't need full parsing for initial check
             soup = BeautifulSoup(response.content, 'html.parser')
+            text = soup.get_text().lower()
             
-            # Remove unwanted elements
-            for element in soup(["script", "style", "meta", "link"]):
-                element.decompose()
+            # Check for Item 1.05 patterns first
+            item_105_patterns = [
+                r'item\s+1\.0?5[^0-9]',
+                r'item\s+1\s+0\s*5[^0-9]',
+                r'cybersecurity\s+incident',
+                r'material\s+cybersecurity'
+            ]
             
-            text = soup.get_text()
+            has_item_105 = any(re.search(pattern, text) for pattern in item_105_patterns)
             
-            # Clean up text
+            if not has_item_105:
+                logger.debug("No Item 1.05 found - skipping")
+                return None
+            
+            logger.debug("Item 1.05 detected - proceeding with full analysis")
+            
+            # Clean up text for full analysis
             lines = (line.strip() for line in text.splitlines())
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             cleaned_text = ' '.join(chunk for chunk in chunks if chunk)
             
-            logger.debug(f"Extracted {len(cleaned_text)} characters")
             return cleaned_text
             
         except Exception as e:
-            logger.error(f"Error parsing filing content: {str(e)}")
+            logger.error(f"Error in Item 1.05 check: {str(e)}")
             return None
+    
+    def pre_filter_8k_filings_for_cybersecurity(self, filings: List[Dict]) -> List[Dict]:
+        """Pre-filter 8-K filings to only include those with Item 1.05 cybersecurity content"""
+        logger.info(f"Pre-filtering {len(filings)} 8-K filings for Item 1.05 cybersecurity content...")
+        
+        cyber_filings = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, filing in enumerate(filings):
+            progress = (i + 1) / len(filings)
+            progress_bar.progress(progress)
+            status_text.text(f'Checking {filing["company_name"]} for Item 1.05 ({i+1}/{len(filings)})')
+            
+            # Quick check for Item 1.05 content
+            content = self.analyze_8k_content_for_item_105(filing['filing_url'])
+            if content:
+                # Add the content to the filing for later use
+                filing['analyzed_content'] = content
+                cyber_filings.append(filing)
+                logger.info(f"✓ Item 1.05 found in {filing['company_name']}")
+        
+        progress_bar.progress(1.0)
+        status_text.text(f'✅ Pre-filtered to {len(cyber_filings)} Item 1.05 filings')
+        
+        logger.info(f"Pre-filtering complete: {len(cyber_filings)} out of {len(filings)} filings contain Item 1.05")
+        return cyber_filings
     
     def detect_cybersecurity_incident(self, content: str, filing_info: Dict) -> Optional[CyberIncident]:
         """Analyze filing content for cybersecurity incidents"""
@@ -656,62 +691,80 @@ class SECBulkDataMonitor:
         return None
     
     def monitor_cybersecurity_incidents_bulk(self, days_back: int = 14, max_filings: int = 1000) -> List[CyberIncident]:
-        """Main monitoring function using bulk data"""
+        """Main monitoring function using bulk data - now pre-filters for Item 1.05"""
         logger.info(f"=== Starting BULK cybersecurity monitoring ===")
         logger.info(f"Monitoring period: {days_back} days")
         logger.info(f"Maximum filings: {max_filings}")
         
         self.api_responses = []
         
-        # Get bulk 8-K filings
-        logger.info("Fetching bulk 8-K filings from SEC daily indices...")
-        filings = self.get_bulk_8k_filings(days_back, max_filings)
+        # Step 1: Get bulk 8-K filings from SEC daily indices
+        logger.info("Step 1: Fetching bulk 8-K filings from SEC daily indices...")
+        all_8k_filings = self.get_bulk_8k_filings(days_back, max_filings)
         
-        if not filings:
-            logger.error("❌ No filings retrieved from SEC bulk data")
+        if not all_8k_filings:
+            logger.error("❌ No 8-K filings retrieved from SEC bulk data")
             return []
         
-        logger.info(f"✅ Retrieved {len(filings)} filings for analysis")
+        logger.info(f"✅ Retrieved {len(all_8k_filings)} total 8-K filings")
         
+        # Step 2: Pre-filter for Item 1.05 cybersecurity content only
+        logger.info("Step 2: Pre-filtering 8-K filings for Item 1.05 cybersecurity content...")
+        cyber_8k_filings = self.pre_filter_8k_filings_for_cybersecurity(all_8k_filings)
+        
+        if not cyber_8k_filings:
+            logger.info("❌ No Item 1.05 cybersecurity filings found after pre-filtering")
+            return []
+        
+        logger.info(f"✅ Found {len(cyber_8k_filings)} filings with Item 1.05 cybersecurity content")
+        
+        # Step 3: Detailed analysis of cybersecurity filings only
+        logger.info("Step 3: Performing detailed cybersecurity analysis...")
         incidents = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Analyze filings with threading for speed
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_filing = {
-                executor.submit(self.analyze_single_filing, filing): filing 
-                for filing in filings
-            }
+        for i, filing in enumerate(cyber_8k_filings):
+            progress = (i + 1) / len(cyber_8k_filings)
+            progress_bar.progress(progress)
+            status_text.text(f'Analyzing cybersecurity incident: {filing["company_name"]} ({i+1}/{len(cyber_8k_filings)})')
             
-            for i, future in enumerate(as_completed(future_to_filing)):
-                progress = (i + 1) / len(filings)
-                progress_bar.progress(progress)
-                
-                filing = future_to_filing[future]
-                status_text.text(f'Analyzing {filing["company_name"]} ({i+1}/{len(filings)})')
-                
-                try:
-                    incident = future.result()
-                    if incident:
-                        incidents.append(incident)
-                        logger.info(f"🚨 CYBERSECURITY INCIDENT: {incident.company_name}")
-                except Exception as e:
-                    logger.error(f"Error analyzing {filing['company_name']}: {e}")
+            logger.info(f"--- Detailed analysis {i+1}/{len(cyber_8k_filings)}: {filing['company_name']} ---")
+            
+            # Use pre-analyzed content if available
+            content = filing.get('analyzed_content')
+            if not content:
+                logger.warning(f"No pre-analyzed content for {filing['company_name']}, re-analyzing...")
+                content = self.analyze_8k_content_for_item_105(filing['filing_url'])
+            
+            if content:
+                incident = self.detect_cybersecurity_incident(content, filing)
+                if incident:
+                    incidents.append(incident)
+                    logger.info(f"🚨 CYBERSECURITY INCIDENT CONFIRMED: {incident.company_name} (confidence: {incident.confidence_score:.2f})")
+                else:
+                    logger.info(f"Item 1.05 found but low confidence score for {filing['company_name']}")
+            else:
+                logger.warning(f"Failed to analyze content for {filing['company_name']}")
         
         progress_bar.progress(1.0)
-        status_text.text(f'✅ Analyzed {len(filings)} filings, found {len(incidents)} incidents')
+        status_text.text(f'✅ Analyzed {len(cyber_8k_filings)} cybersecurity filings, found {len(incidents)} incidents')
         
-        logger.info(f"=== Bulk Monitoring Complete ===")
-        logger.info(f"Total filings analyzed: {len(filings)}")
-        logger.info(f"Cybersecurity incidents found: {len(incidents)}")
+        logger.info(f"=== Bulk Cybersecurity Monitoring Complete ===")
+        logger.info(f"Total 8-K filings collected: {len(all_8k_filings)}")
+        logger.info(f"Item 1.05 cybersecurity filings: {len(cyber_8k_filings)}")
+        logger.info(f"Confirmed cybersecurity incidents: {len(incidents)}")
         
         incidents.sort(key=lambda x: x.confidence_score, reverse=True)
         return incidents
     
     def analyze_single_filing(self, filing: Dict) -> Optional[CyberIncident]:
-        """Analyze a single filing for cybersecurity incidents"""
-        content = self.analyze_8k_content(filing['filing_url'])
+        """Analyze a single filing for cybersecurity incidents - now expects pre-filtered filings"""
+        # Use pre-analyzed content if available, otherwise re-analyze
+        content = filing.get('analyzed_content')
+        if not content:
+            content = self.analyze_8k_content_for_item_105(filing['filing_url'])
+        
         if content:
             return self.detect_cybersecurity_incident(content, filing)
         return None
@@ -882,12 +935,51 @@ def main():
         high_confidence_incidents = [i for i in incidents if i.confidence_score >= min_confidence]
         total_incidents = len(incidents)
         
-        # Display results summary
+        # Display results summary with filtering stats
         if incidents:
-            st.success(f"🎉 BULK SCAN COMPLETE! Found {len(high_confidence_incidents)} high-confidence incidents out of {total_incidents} total detections.")
-        else:
-            st.warning(f"Bulk scan complete! No cybersecurity incidents detected in the analyzed filings over {days_back} days.")
+            st.success(f"🎉 CYBERSECURITY MONITORING COMPLETE!")
             
+            # Show filtering efficiency
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total 8-K Filings", len(api_log) if not api_log.empty else "Unknown")
+            with col2: 
+                st.metric("Item 1.05 Filings", "Unknown")  # Will be updated based on logs
+            with col3:
+                st.metric("Confirmed Incidents", len(high_confidence_incidents))
+            with col4:
+                efficiency = (len(high_confidence_incidents) / len(api_log) * 100) if not api_log.empty and len(api_log) > 0 else 0
+                st.metric("Detection Rate", f"{efficiency:.1f}%")
+            
+        else:
+            st.warning(f"Cybersecurity monitoring complete! No incidents detected.")
+            st.info(f"📊 **Process Summary:** The system now pre-filters 8-K filings to only analyze those containing Item 1.05 cybersecurity content, making the process much more efficient.")
+            
+        # Extract filing stats from logs for better metrics
+        if debug_mode:
+            logs = streamlit_handler.get_logs()
+            total_8k_match = re.search(r'Retrieved (\d+) total 8-K filings', logs)
+            item_105_match = re.search(r'Found (\d+) filings with Item 1\.05', logs)
+            
+            if total_8k_match or item_105_match:
+                st.header("📊 Filtering Efficiency")
+                
+                if total_8k_match and item_105_match:
+                    total_8k = int(total_8k_match.group(1))
+                    item_105_count = int(item_105_match.group(1))
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total 8-K Filings", total_8k)
+                    with col2:
+                        st.metric("Item 1.05 Filings", item_105_count)  
+                    with col3:
+                        if total_8k > 0:
+                            filtering_efficiency = (item_105_count / total_8k) * 100
+                            st.metric("Pre-filter Efficiency", f"{filtering_efficiency:.1f}%")
+                        
+                    st.info(f"💡 **Efficiency Gain:** By pre-filtering for Item 1.05, we only analyzed {item_105_count} out of {total_8k} total 8-K filings, focusing on cybersecurity-relevant content only.")
+        
         # Show detailed results if incidents found
         if high_confidence_incidents:
             st.header("🚨 Cybersecurity Incidents Detected")
