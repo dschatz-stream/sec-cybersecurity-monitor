@@ -189,7 +189,202 @@ class ProductionEdgarMonitor:
                 
         return None
     
-    def get_recent_8k_filings_rss(self, days_back: int = 7) -> List[Dict]:
+    def get_recent_8k_filings_comprehensive(self, days_back: int = 7) -> List[Dict]:
+        """Get more comprehensive 8-K filings using multiple methods"""
+        logger.info(f"Starting comprehensive 8-K fetch for last {days_back} days")
+        
+        all_filings = []
+        
+        # Method 1: RSS Feed (most recent ~100)
+        logger.info("Method 1: Fetching from RSS feed...")
+        rss_filings = self.get_recent_8k_filings_rss_unlimited(days_back)
+        all_filings.extend(rss_filings)
+        logger.info(f"RSS method found {len(rss_filings)} filings")
+        
+        # Method 2: Daily RSS feeds (if we need more)
+        if days_back > 3:  # For longer periods, try daily feeds
+            logger.info("Method 2: Fetching daily RSS feeds...")
+            daily_filings = self.get_daily_rss_filings(days_back)
+            all_filings.extend(daily_filings)
+            logger.info(f"Daily RSS method found {len(daily_filings)} additional filings")
+        
+        # Remove duplicates based on CIK + filing date
+        seen = set()
+        unique_filings = []
+        for filing in all_filings:
+            key = (filing.get('cik', ''), filing.get('published', ''), filing.get('title', ''))
+            if key not in seen:
+                seen.add(key)
+                unique_filings.append(filing)
+        
+        logger.info(f"Total unique filings after deduplication: {len(unique_filings)}")
+        return unique_filings
+    
+    def get_recent_8k_filings_rss_unlimited(self, days_back: int = 7) -> List[Dict]:
+        """Enhanced RSS method with higher limits"""
+        logger.info(f"Starting unlimited RSS feed fetch for last {days_back} days")
+        
+        # Use higher count and try multiple requests if needed
+        max_count = min(1000, days_back * 50)  # Much higher limit
+        params = {
+            'action': 'getcurrent',
+            'type': '8-K',
+            'output': 'atom',
+            'count': max_count
+        }
+        
+        response = self._make_request(self.edgar_rss, params)
+        if not response:
+            logger.error("Failed to get RSS response")
+            return []
+        
+        logger.info(f"Received {len(response.content)} bytes from RSS feed (requesting {max_count} entries)")
+        
+        # Log first 500 chars for debugging
+        content_preview = response.text[:500] if response.text else "No text content"
+        logger.debug(f"Response preview: {content_preview}")
+        
+        return self._process_rss_feed(response, days_back)
+    
+    def get_daily_rss_filings(self, days_back: int) -> List[Dict]:
+        """Try to get more filings by checking daily archives"""
+        logger.info(f"Fetching daily RSS feeds for {days_back} days")
+        
+        all_filings = []
+        
+        # Try different RSS endpoints for more coverage
+        rss_endpoints = [
+            'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&output=atom&count=200',
+            'https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip',  # Alternative
+        ]
+        
+        for i in range(min(days_back, 7)):  # Limit to 7 days to avoid too many requests
+            date = datetime.now() - timedelta(days=i)
+            
+            # Try date-specific RSS (if available)
+            date_params = {
+                'action': 'getcurrent',
+                'type': '8-K', 
+                'output': 'atom',
+                'count': 200,
+                'date': date.strftime('%Y-%m-%d')
+            }
+            
+            response = self._make_request(self.edgar_rss, date_params)
+            if response:
+                filings = self._process_rss_feed(response, 1)  # Just today
+                logger.info(f"Date {date.strftime('%Y-%m-%d')}: found {len(filings)} filings")
+                all_filings.extend(filings)
+            
+            # Rate limiting
+            time.sleep(0.2)
+        
+        return all_filings
+    
+    def _process_rss_feed(self, response, days_back: int) -> List[Dict]:
+        """Process RSS feed response into filing data"""
+        try:
+            # Parse RSS/Atom feed
+            logger.info("Attempting to parse with feedparser...")
+            feed = feedparser.parse(response.content)
+            
+            if not hasattr(feed, 'entries') or len(feed.entries) == 0:
+                logger.warning("Feedparser found no entries")
+                logger.debug(f"Feed info: {getattr(feed, 'feed', {})}")
+                return []
+            
+            logger.info(f"Feedparser found {len(feed.entries)} entries")
+            
+            filings = []
+            cutoff_date = datetime.now() - timedelta(days=days_back)
+            
+            for i, entry in enumerate(feed.entries):
+                try:
+                    logger.debug(f"Processing entry {i+1}: {getattr(entry, 'title', 'No title')}")
+                    
+                    # Parse entry date - try multiple date fields and formats
+                    entry_date = None
+                    
+                    # Try different date fields
+                    date_fields = ['published_parsed', 'updated_parsed', 'created_parsed']
+                    for date_field in date_fields:
+                        if hasattr(entry, date_field) and getattr(entry, date_field):
+                            try:
+                                entry_date = datetime(*getattr(entry, date_field)[:6])
+                                logger.debug(f"Entry {i+1} date from {date_field}: {entry_date}")
+                                break
+                            except Exception as e:
+                                logger.debug(f"Failed to parse {date_field} for entry {i+1}: {e}")
+                    
+                    # Try parsing string dates if structured dates fail
+                    if not entry_date:
+                        string_date_fields = ['published', 'updated', 'created']
+                        for date_field in string_date_fields:
+                            if hasattr(entry, date_field):
+                                date_str = getattr(entry, date_field)
+                                logger.debug(f"Trying to parse string date from {date_field}: {date_str}")
+                                try:
+                                    # Try parsing ISO format date
+                                    if 'T' in str(date_str):
+                                        entry_date = datetime.fromisoformat(str(date_str).replace('Z', '+00:00').replace('-04:00', '').replace('-05:00', ''))
+                                    elif DATEUTIL_AVAILABLE:
+                                        # Try parsing other common formats with dateutil
+                                        entry_date = date_parser.parse(str(date_str))
+                                    logger.debug(f"Successfully parsed date: {entry_date}")
+                                    break
+                                except Exception as e:
+                                    logger.debug(f"Failed to parse {date_field} string for entry {i+1}: {e}")
+                    
+                    # If still no date, use current date (assume recent filings are from today)
+                    if not entry_date:
+                        logger.debug(f"No date found for entry {i+1}, assuming recent filing - using current date")
+                        entry_date = datetime.now()
+                    
+                    logger.debug(f"Final entry date for {i+1}: {entry_date}")
+                    
+                    if entry_date < cutoff_date:
+                        logger.debug(f"Entry {i+1} too old: {entry_date} < {cutoff_date}")
+                        continue
+                    
+                    # Extract company info from title
+                    title = getattr(entry, 'title', '')
+                    if '8-K' not in title.upper():
+                        logger.debug(f"Entry {i+1} not an 8-K: {title}")
+                        continue
+                    
+                    company_match = re.search(r'8-K\s*(?:/A)?\s*-\s*(.+?)\s*\(([^)]+)\)', title, re.IGNORECASE)
+                    if company_match:
+                        company_name = company_match.group(1).strip()
+                        cik_info = company_match.group(2)
+                        cik_match = re.search(r'\b(\d{10})\b', cik_info)
+                        cik = cik_match.group(1) if cik_match else ""
+                        
+                        filing = {
+                            'title': title,
+                            'company_name': company_name,
+                            'cik': cik,
+                            'filing_url': getattr(entry, 'link', ''),
+                            'published': entry_date.isoformat(),
+                            'summary': getattr(entry, 'summary', '')
+                        }
+                        filings.append(filing)
+                        logger.debug(f"Added filing: {company_name}")
+                    else:
+                        logger.debug(f"Could not parse company from title: {title}")
+                        
+                except Exception as e:
+                    logger.error(f"Error processing entry {i+1}: {str(e)}")
+                    if self.debug_mode:
+                        logger.error(f"Entry details: {vars(entry) if hasattr(entry, '__dict__') else entry}")
+            
+            logger.info(f"Processed {len(filings)} valid 8-K filings")
+            return filings
+            
+        except Exception as e:
+            logger.error(f"Error parsing RSS feed: {str(e)}")
+            if self.debug_mode:
+                logger.error(f"Full traceback: {traceback.format_exc()}")
+            return []
         """Get recent 8-K filings using SEC RSS feed with enhanced debugging"""
         logger.info(f"Starting RSS feed fetch for last {days_back} days")
         
@@ -533,7 +728,7 @@ class ProductionEdgarMonitor:
         }
     
     def monitor_cybersecurity_incidents(self, days_back: int = 7, use_rss: bool = True) -> List[CyberIncident]:
-        """Main monitoring function with comprehensive logging"""
+        """Main monitoring function with comprehensive filing collection"""
         logger.info(f"=== Starting cybersecurity monitoring ===")
         logger.info(f"Monitoring period: {days_back} days")
         logger.info(f"Debug mode: {self.debug_mode}")
@@ -541,9 +736,9 @@ class ProductionEdgarMonitor:
         # Clear previous API responses
         self.api_responses = []
         
-        # Get recent 8-K filings
-        logger.info("Fetching recent 8-K filings...")
-        filings = self.get_recent_8k_filings_rss(days_back)
+        # Get recent 8-K filings using comprehensive method
+        logger.info("Fetching recent 8-K filings with comprehensive method...")
+        filings = self.get_recent_8k_filings_comprehensive(days_back)
         
         if not filings:
             logger.error("❌ No filings retrieved from SEC")
