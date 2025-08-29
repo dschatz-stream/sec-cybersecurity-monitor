@@ -21,7 +21,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Version information
-VERSION = "2.1.25-STRICT"
+VERSION = "2.1.27-STRICT"
 BUILD_DATE = "2024-08-28"
 FEATURES = [
     "STRICT Item 1.05 Incident Detection",
