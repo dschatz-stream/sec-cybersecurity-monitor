@@ -1,5 +1,5 @@
 # SEC 8-K Cybersecurity Monitor - Strict Item 1.05 Incident Detection
-# Version: 2.1.23 - STRICT MODE
+# Version: 2.1.0 - STRICT MODE
 # Features: ONLY actual cybersecurity incidents/attacks as core purpose of Item 1.05
 # Last Updated: 2024-08-28
 
@@ -21,8 +21,8 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Version information
-VERSION = "2.1.23-STRICT"
-BUILD_DATE = "2024-08-28"
+VERSION = "2.1.24-STRICT"
+BUILD_DATE = "2024-08-29"
 FEATURES = [
     "STRICT Item 1.05 Incident Detection",
     "Core Purpose Cybersecurity Analysis", 
@@ -1297,7 +1297,6 @@ def main():
         else:
             st.info(f"📊 No Item 1.05 cybersecurity filings found in the last {days_back} days.")
             st.markdown("🔍 **This means no companies filed cybersecurity incident reports during this period - which is actually normal, as these incidents are relatively rare.**")
-        
         # Show detailed results if incidents found
         if high_confidence_incidents:
             st.header("🚨 STRICT Cybersecurity Incidents")
