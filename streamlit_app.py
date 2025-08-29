@@ -1,5 +1,5 @@
 # SEC 8-K Cybersecurity Monitor - Strict Item 1.05 Incident Detection
-# Version: 2.1.0 - STRICT MODE
+# Version: 2.1.23 - STRICT MODE
 # Features: ONLY actual cybersecurity incidents/attacks as core purpose of Item 1.05
 # Last Updated: 2024-08-28
 
@@ -21,7 +21,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Version information
-VERSION = "2.1.0-STRICT"
+VERSION = "2.1.23-STRICT"
 BUILD_DATE = "2024-08-28"
 FEATURES = [
     "STRICT Item 1.05 Incident Detection",
@@ -284,8 +284,21 @@ class SECBulkDataMonitor:
         
         item_105_filings = []
         
+        # Show progress for Item 1.05 checking
+        if len(daily_8k_filings) > 10:  # Only show progress bar for larger batches
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+        else:
+            progress_bar = None
+            status_text = None
+        
         # Check each 8-K filing for Item 1.05 content
-        for filing in daily_8k_filings:
+        for i, filing in enumerate(daily_8k_filings):
+            if progress_bar:
+                progress = (i + 1) / len(daily_8k_filings)
+                progress_bar.progress(progress)
+                status_text.text(f'Checking {filing["company_name"]} for Item 1.05... ({i+1}/{len(daily_8k_filings)})')
+            
             logger.debug(f"Checking {filing['company_name']} for Item 1.05...")
             
             # Quick check for Item 1.05
@@ -294,6 +307,12 @@ class SECBulkDataMonitor:
                 logger.info(f"✓ Item 1.05 confirmed: {filing['company_name']}")
             else:
                 logger.debug(f"✗ No Item 1.05: {filing['company_name']}")
+        
+        # Clear progress indicators
+        if progress_bar:
+            progress_bar.progress(1.0)
+            status_text.text(f'✅ Found {len(item_105_filings)} Item 1.05 filings from {len(daily_8k_filings)} total 8-Ks')
+            time.sleep(1)  # Brief pause to show completion
         
         return item_105_filings
     
@@ -979,21 +998,21 @@ class SECBulkDataMonitor:
         return pd.DataFrame(log_data)
 
 def main():
-    st.title("🔍 SEC 8-K Monitor - BULK DATA VERSION")
-    st.markdown(f"**Version {VERSION} - Get 1000+ filings using SEC's bulk daily index files**")
+    st.title("🔍 SEC 8-K Monitor - STRICT CYBERSECURITY MODE")
+    st.markdown(f"**Version {VERSION} - ONLY actual cybersecurity incidents with Item 1.05 as core purpose**")
     
     # Version badge
     st.sidebar.markdown(f"""
     <div style='background: linear-gradient(90deg, #FF6B6B, #4ECDC4); padding: 8px; border-radius: 5px; margin-bottom: 10px;'>
-        <strong style='color: white;'>🚀 Version {VERSION}</strong><br/>
-        <small style='color: white; opacity: 0.9;'>Build: {BUILD_DATE}</small>
+        <strong style='color: white;'>🎯 STRICT MODE {VERSION}</strong><br/>
+        <small style='color: white; opacity: 0.9;'>Core Cybersecurity Only</small>
     </div>
     """, unsafe_allow_html=True)
     
     # Sidebar configuration
     st.sidebar.header("⚙️ Configuration")
     
-    debug_mode = st.sidebar.checkbox("🐛 Enable Debug Mode", value=False)
+    debug_mode = st.sidebar.checkbox("🐛 Enable Debug Mode", value=True, help="Show detailed logs and API communication")
     
     company_name = st.sidebar.text_input("Company Name", value="CyberSecurityTracker")
     email = st.sidebar.text_input("Contact Email", value="contact@company.com")
@@ -1005,48 +1024,43 @@ def main():
     days_back = st.sidebar.slider("Monitoring Period (days)", 1, 30, 14)
     
     max_filings = st.sidebar.selectbox(
-        "Maximum Filings to Analyze",
+        "Maximum 8-K Filings to Check",
         [100, 500, 1000, 2000, 5000],
         index=2,
-        help="Higher = more comprehensive but slower"
+        help="Higher = more comprehensive search but slower"
     )
     
-    min_confidence = st.sidebar.slider("Min Confidence", 0.1, 1.0, 0.2, 0.1)
+    min_confidence = st.sidebar.slider("Min Confidence", 0.1, 1.0, 0.3, 0.1)
     
-    # Feature highlights
+    # Strict mode explanation
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**✨ Key Features:**")
-    for feature in FEATURES[:3]:  # Show top 3 features
-        st.sidebar.markdown(f"• {feature}")
+    st.sidebar.markdown("**🎯 STRICT MODE:**")
+    st.sidebar.markdown("• Only actual cybersecurity attacks/breaches")
+    st.sidebar.markdown("• Item 1.05 as PRIMARY purpose") 
+    st.sidebar.markdown("• Excludes risk/policy discussions")
     
-    st.header("📊 BULK Data Collection")
+    st.header("🎯 STRICT Cybersecurity Incident Detection")
     
-    # Information about bulk data approach
-    with st.expander("ℹ️ How Bulk Data Collection Works"):
+    # Information about strict mode
+    with st.expander("ℹ️ How STRICT Mode Works"):
         st.markdown("""
-        **This version uses SEC's official bulk data system:**
+        **This version uses 5-step validation to ensure ONLY real cybersecurity incidents:**
         
-        1. **Daily Index Files**: Downloads SEC's daily filing index files
-        2. **Historical Coverage**: Scans back through multiple days of filings  
-        3. **Company Mapping**: Maps CIKs to ticker symbols
-        4. **Bulk Processing**: Analyzes hundreds/thousands of filings
-        5. **Multi-threading**: Parallel processing for speed
+        1. **Item 1.05 Detection**: Must contain actual Item 1.05 section
+        2. **Section Analysis**: Extracts and analyzes ONLY Item 1.05 content  
+        3. **Core Purpose Check**: Cybersecurity incident must be PRIMARY focus
+        4. **Occurrence Validation**: Must describe actual incident (not just risks)
+        5. **False Positive Filter**: Excludes policy/risk management discussions
         
-        **Expected Results:**
-        - 14 days ≈ 1,000-2,000 filings
-        - 30 days ≈ 2,000-4,000 filings
-        
-        **Why this works better than RSS:**
-        - RSS feeds limited to ~100 recent filings
-        - Bulk data covers complete historical periods
-        - Real control over volume and timeframe
+        **INCLUDED:** Ransomware attacks, data breaches, system intrusions, cyber attacks
+        **EXCLUDED:** Risk assessments, policy updates, general cybersecurity discussions
         """)
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown("**Ready to scan SEC's bulk data archives for cybersecurity incidents?**")
+        st.markdown("**Ready to find ONLY actual cybersecurity incidents with strict validation?**")
     with col2:
-        run_monitor = st.button("🚀 Start BULK Scan", type="primary")
+        run_monitor = st.button("🎯 Start STRICT Scan", type="primary")
     
     if run_monitor:
         # Clear previous logs
@@ -1054,8 +1068,133 @@ def main():
             streamlit_handler.clear_logs()
         
         # Initialize monitor
-        with st.spinner("Initializing bulk data monitor..."):
+        with st.spinner("Initializing strict cybersecurity monitor..."):
             monitor = SECBulkDataMonitor(company_name, email, debug_mode)
+        
+        # Show debug information if enabled
+        if debug_mode:
+            with st.expander("🐛 System Debug Information", expanded=False):
+                debug_info = {
+                    'version': VERSION,
+                    'mode': 'STRICT_CYBERSECURITY_ONLY',
+                    'build_date': BUILD_DATE,
+                    'features': FEATURES,
+                    'configuration': {
+                        'user_agent': monitor.headers['User-Agent'],
+                        'days_back': days_back,
+                        'max_filings_to_check': max_filings,
+                        'min_confidence': min_confidence,
+                        'debug_mode': debug_mode
+                    },
+                    'endpoints': {
+                        'bulk_data_base': monitor.bulk_data_base,
+                        'company_tickers': monitor.company_tickers_url
+                    },
+                    'strict_validation': {
+                        'item_105_required': True,
+                        'core_purpose_validation': True,
+                        'occurrence_indicators_required': True,
+                        'false_positive_exclusion': True,
+                        'minimum_word_count': 50,
+                        'confidence_threshold': min_confidence
+                    },
+                    'keyword_categories': {
+                        'attack_types': len(['ransomware attack', 'cyber attack', 'malware attack']),
+                        'breach_types': len(['data breach', 'security breach']), 
+                        'intrusion_types': len(['unauthorized access', 'system intrusion']),
+                        'total_patterns': 'Multi-category validation'
+                    }
+                }
+                st.json(debug_info)
+        
+        # Run the strict cybersecurity scan
+        with st.spinner(f"Scanning for STRICT cybersecurity incidents over {days_back} days..."):
+            incidents = monitor.monitor_cybersecurity_incidents_bulk(days_back, max_filings)
+        
+        # Show debug information if enabled
+        if debug_mode:
+            st.header("🔗 SEC API Communication Log")
+            api_log = monitor.get_api_communication_log()
+            if not api_log.empty:
+                st.dataframe(api_log, use_container_width=True)
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total API Calls", len(api_log))
+                with col2:
+                    success_rate = len(api_log[api_log['Status Code'] == 200]) / len(api_log) * 100
+                    st.metric("Success Rate", f"{success_rate:.1f}%")
+                with col3:
+                    total_data = api_log['Content Length'].sum()
+                    st.metric("Total Data", f"{total_data:,} bytes")
+                with col4:
+                    avg_time = api_log['Response Time (s)'].mean()
+                    st.metric("Avg Response Time", f"{avg_time:.2f}s")
+            else:
+                st.info("No API calls recorded")
+            
+            st.header("📋 System Logs")
+            logs = streamlit_handler.get_logs()
+            if logs:
+                st.text_area("Debug Logs", logs, height=300)
+            else:
+                st.info("No system logs generated")
+        
+        # Filter incidents by confidence
+        high_confidence_incidents = [i for i in incidents if i.confidence_score >= min_confidence]
+        total_incidents = len(incidents)
+        
+        # Extract Item 1.05 filing stats from logs for metrics
+        if debug_mode:
+            logs = streamlit_handler.get_logs()
+            item_105_match = re.search(r'Found (\d+) Item 1\.05 cybersecurity filings', logs)
+            
+            if item_105_match:
+                st.header("🎯 STRICT Validation Results")
+                
+                item_105_count = int(item_105_match.group(1))
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Item 1.05 Filings Found", item_105_count)
+                with col2:
+                    st.metric("STRICT Validation Passed", len(incidents))
+                with col3:
+                    if item_105_count > 0:
+                        strict_success_rate = (len(incidents) / item_105_count) * 100
+                        st.metric("Strict Validation Rate", f"{strict_success_rate:.1f}%")
+                        
+                st.success(f"✅ **STRICT MODE:** Found {item_105_count} Item 1.05 filings, {len(incidents)} passed strict validation for actual cybersecurity incidents.")
+        
+        # Display results summary
+        if incidents:
+            if len(high_confidence_incidents) > 0:
+                st.success(f"🚨 STRICT CYBERSECURITY INCIDENTS DETECTED: {len(high_confidence_incidents)} confirmed incidents!")
+                
+                # Show incident confidence distribution
+                if debug_mode and len(incidents) > 1:
+                    st.subheader("📊 Confidence Score Distribution")
+                    confidence_scores = [i.confidence_score for i in incidents]
+                    confidence_df = pd.DataFrame({
+                        'Company': [i.company_name for i in incidents],
+                        'Confidence': confidence_scores
+                    })
+                    
+                    import plotly.express as px
+                    fig = px.bar(confidence_df, x='Company', y='Confidence', 
+                               title="Incident Detection Confidence Scores")
+                    fig.add_hline(y=min_confidence, line_dash="dash", line_color="red", 
+                                annotation_text="Min Threshold")
+                    st.plotly_chart(fig, use_container_width=True)
+                
+            else:
+                st.info(f"📊 Found {total_incidents} potential cybersecurity incidents, but none met the strict confidence threshold of {min_confidence:.1f}")
+                st.markdown("💡 **Try lowering the confidence threshold to see incidents that passed strict validation but have lower confidence scores.**")
+        else:
+            st.info(f"📊 No STRICT cybersecurity incidents found in the last {days_back} days.")
+            st.markdown("🔍 **This means no companies filed Item 1.05 reports with cybersecurity incidents as the core purpose during this period.**")
+            if debug_mode:
+                st.markdown("**Check the debug logs above to see what was found and why it was filtered out.**")
         
         if debug_mode:
             with st.expander("🐛 System Debug Information", expanded=False):
@@ -1161,6 +1300,101 @@ def main():
         
         # Show detailed results if incidents found
         if high_confidence_incidents:
+            st.header("🚨 STRICT Cybersecurity Incidents")
+            
+            # Summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("High Confidence", len(high_confidence_incidents))
+            with col2:
+                st.metric("Total Detected", total_incidents)
+            with col3:
+                if high_confidence_incidents:
+                    avg_confidence = sum(i.confidence_score for i in high_confidence_incidents) / len(high_confidence_incidents)
+                    st.metric("Avg Confidence", f"{avg_confidence:.2f}")
+                else:
+                    st.metric("Avg Confidence", "0.00")
+            with col4:
+                unique_companies = len(set(i.company_name for i in high_confidence_incidents))
+                st.metric("Unique Companies", unique_companies)
+            
+            # Incidents table
+            incidents_data = []
+            for incident in high_confidence_incidents:
+                incidents_data.append({
+                    "Company": incident.company_name,
+                    "Ticker": incident.ticker if incident.ticker else "N/A",
+                    "Filing Date": incident.filing_date,
+                    "Confidence": f"{incident.confidence_score:.2f}",
+                    "Keywords Found": len(incident.keywords),
+                    "Top Keywords": ", ".join(incident.keywords[:3]) + ("..." if len(incident.keywords) > 3 else "")
+                })
+            
+            if incidents_data:
+                df = pd.DataFrame(incidents_data)
+                st.dataframe(df, use_container_width=True)
+            
+            # Detailed incident analysis
+            st.subheader("📋 Detailed STRICT Incident Analysis")
+            for i, incident in enumerate(high_confidence_incidents):
+                with st.expander(f"#{i+1}: {incident.company_name} ({incident.ticker or 'No ticker'}) - Confidence: {incident.confidence_score:.2f}"):
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        st.markdown("**📝 Cybersecurity Incident Description:**")
+                        st.write(incident.incident_description)
+                        
+                        st.markdown("**🔗 SEC Filing:**")
+                        st.link_button("View Original 8-K Filing", incident.filing_url)
+                        
+                        if debug_mode and incident.raw_content_preview:
+                            st.markdown("**🐛 Item 1.05 Section Preview:**")
+                            st.text_area(f"Item 1.05 preview #{i+1}", incident.raw_content_preview, height=100)
+                    
+                    with col2:
+                        st.markdown("**📊 STRICT Validation Results:**")
+                        incident_metadata = {
+                            "Company": incident.company_name,
+                            "Ticker": incident.ticker or "Unknown",
+                            "CIK": incident.cik,
+                            "Filing Date": incident.filing_date,
+                            "Incident Date": incident.incident_date or "Not specified",
+                            "Filing Type": incident.filing_type,
+                            "STRICT Confidence": round(incident.confidence_score, 3),
+                            "Attack Keywords": incident.keywords,
+                            "Validation": "✅ PASSED STRICT MODE"
+                        }
+                        st.json(incident_metadata)
+        
+        elif total_incidents > 0:
+            st.info(f"Found {total_incidents} potential cybersecurity incidents, but none met the strict confidence threshold of {min_confidence:.1f}")
+            st.markdown("**💡 Try lowering the confidence threshold to see incidents that passed STRICT validation but have lower confidence scores.**")
+            
+            if debug_mode:
+                st.subheader("🔍 Below-Threshold Detections (Debug Only)")
+                low_confidence_incidents = [i for i in incidents if i.confidence_score < min_confidence]
+                for i, incident in enumerate(low_confidence_incidents[:3]):  # Show max 3
+                    with st.expander(f"Below-threshold #{i+1}: {incident.company_name} - Confidence: {incident.confidence_score:.2f}"):
+                        st.write(f"**Attack Keywords:** {', '.join(incident.keywords)}")
+                        st.write(f"**Description Preview:** {incident.incident_description[:200]}...")
+                        st.write(f"**Why Below Threshold:** Confidence {incident.confidence_score:.2f} < {min_confidence:.1f}")
+                        st.write(f"**Filing URL:** {incident.filing_url}")
+        
+        else:
+            st.info(f"No STRICT cybersecurity incidents detected in the last {days_back} days.")
+            if debug_mode:
+                st.markdown("**🔧 Troubleshooting:**")
+                st.markdown("- Check the debug logs above to see what 8-K filings were found")  
+                st.markdown("- Verify if any contained Item 1.05 sections")
+                st.markdown("- STRICT mode requires cybersecurity incidents as PRIMARY purpose")
+                st.markdown("- Consider that actual cybersecurity incidents are rare events")
+    
+    # Footer with version info
+    st.markdown("---")
+    st.markdown(f"**SEC 8-K Cybersecurity Monitor v{VERSION}** | STRICT Mode | Built: {BUILD_DATE}")
+
+if __name__ == "__main__":
+    main()
             st.header("🚨 Cybersecurity Incidents Detected")
             
             # Summary metrics
