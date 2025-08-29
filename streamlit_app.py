@@ -21,8 +21,8 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Version information
-VERSION = "2.1.27-STRICT"
-BUILD_DATE = "2024-08-28"
+VERSION = "2.1.2-STRICT"
+BUILD_DATE = "2024-08-29"
 FEATURES = [
     "STRICT Item 1.05 Incident Detection",
     "Core Purpose Cybersecurity Analysis", 
@@ -608,110 +608,6 @@ class SECBulkDataMonitor:
                         filings.append(filing)
             
             return filings
-            
-        except Exception as e:
-            logger.error(f"RSS fallback failed: {e}")
-            return []
-    
-    def get_daily_index_filings(self, target_date: datetime, cik_to_ticker: Dict[str, str]) -> List[Dict]:
-        """Get 8-K filings from SEC daily index for specific date"""
-        
-        # SEC daily index URL format
-        year = target_date.year
-        quarter = f"QTR{(target_date.month - 1) // 3 + 1}"
-        date_str = target_date.strftime('%Y%m%d')
-        
-        # Try both form.idx and master.idx formats
-        index_urls = [
-            f"{self.bulk_data_base}/{year}/{quarter}/form.{date_str}.idx",
-            f"{self.bulk_data_base}/{year}/{quarter}/master.{date_str}.idx"
-        ]
-        
-        for index_url in index_urls:
-            logger.debug(f"Trying daily index: {index_url}")
-            
-            response = self._make_request(index_url)
-            if response:
-                filings = self.parse_daily_index(response.text, target_date, cik_to_ticker)
-                if filings:
-                    return filings
-        
-        logger.debug(f"No daily index found for {target_date.strftime('%Y-%m-%d')}")
-        return []
-    
-    def parse_daily_index(self, index_content: str, filing_date: datetime, cik_to_ticker: Dict[str, str]) -> List[Dict]:
-        """Parse SEC daily index file to extract 8-K filings"""
-        
-        filings = []
-        lines = index_content.split('\n')
-        
-        logger.debug(f"Parsing index file with {len(lines)} lines")
-        
-        # Log first few lines to understand format
-        if self.debug_mode and len(lines) > 10:
-            logger.debug("First 10 lines of index file:")
-            for i, line in enumerate(lines[:10]):
-                logger.debug(f"Line {i}: {line}")
-        
-        # Look for different possible formats
-        data_started = False
-        found_8k_count = 0
-        
-        for line_num, line in enumerate(lines):
-            original_line = line
-            line = line.strip()
-            
-            # Skip empty lines
-            if not line:
-                continue
-            
-            # Skip header lines (usually first 10-15 lines)
-            if line_num < 15 and any(header in line.upper() for header in ['FORM TYPE', 'COMPANY NAME', 'CIK', 'DATE FILED', 'FILE NAME', '----']):
-                continue
-                
-            # Check if this looks like a data line
-            # Format can be: pipe-delimited OR space-delimited OR tab-delimited
-            
-            # Try pipe-delimited first (most common)
-            if '|' in line:
-                parts = [part.strip() for part in line.split('|')]
-                if len(parts) >= 4:
-                    form_type = parts[0]
-                    if form_type.upper() in ['8-K', '8-K/A']:
-                        found_8k_count += 1
-                        filing = self._parse_pipe_delimited_line(parts, filing_date, cik_to_ticker)
-                        if filing:
-                            filings.append(filing)
-                            
-            # Try space/tab delimited format
-            elif any(form in line.upper() for form in ['8-K ', '8-K\t']):
-                # Split on multiple spaces or tabs
-                parts = re.split(r'\s{2,}|\t+', line)
-                if len(parts) >= 4:
-                    found_8k_count += 1
-                    filing = self._parse_space_delimited_line(parts, filing_date, cik_to_ticker)
-                    if filing:
-                        filings.append(filing)
-                        
-            # Try fixed-width format (sometimes used)
-            elif line.upper().startswith('8-K') or '8-K' in line[:20]:
-                found_8k_count += 1
-                filing = self._parse_fixed_width_line(line, filing_date, cik_to_ticker)
-                if filing:
-                    filings.append(filing)
-        
-        logger.debug(f"Found {found_8k_count} potential 8-K lines, parsed {len(filings)} valid filings")
-        
-        # If we found 8-K mentions but no valid filings, log some examples
-        if found_8k_count > 0 and len(filings) == 0 and self.debug_mode:
-            logger.debug("Found 8-K mentions but no valid filings. Sample lines with 8-K:")
-            count = 0
-            for line in lines:
-                if '8-K' in line.upper() and count < 3:
-                    logger.debug(f"Sample 8-K line: {line}")
-                    count += 1
-        
-        return filings
     
     def _parse_pipe_delimited_line(self, parts: List[str], filing_date: datetime, cik_to_ticker: Dict[str, str]) -> Optional[Dict]:
         """Parse pipe-delimited format line"""
@@ -1191,112 +1087,24 @@ def main():
                 st.info(f"📊 Found {total_incidents} potential cybersecurity incidents, but none met the strict confidence threshold of {min_confidence:.1f}")
                 st.markdown("💡 **Try lowering the confidence threshold to see incidents that passed strict validation but have lower confidence scores.**")
         else:
-            st.info(f"📊 No STRICT cybersecurity incidents found in the last {days_back} days.")
+            st.info(f"No STRICT cybersecurity incidents detected in the last {days_back} days.")
+            if debug_mode:
+                st.markdown("**🔧 Troubleshooting:**")
+                st.markdown("- Check the debug logs above to see what 8-K filings were found")  
+                st.markdown("- Verify if any contained Item 1.05 sections")
+                st.markdown("- STRICT mode requires cybersecurity incidents as PRIMARY purpose")
+                st.markdown("- Consider that actual cybersecurity incidents are rare events")
+    
+    # Footer with version info
+    st.markdown("---")
+    st.markdown(f"**SEC 8-K Cybersecurity Monitor v{VERSION}** | STRICT Mode | Built: {BUILD_DATE}")
+
+if __name__ == "__main__":
+    main()📊 No STRICT cybersecurity incidents found in the last {days_back} days.")
             st.markdown("🔍 **This means no companies filed Item 1.05 reports with cybersecurity incidents as the core purpose during this period.**")
             if debug_mode:
                 st.markdown("**Check the debug logs above to see what was found and why it was filtered out.**")
         
-        if debug_mode:
-            with st.expander("🐛 System Debug Information", expanded=False):
-                debug_info = {
-                    'version': VERSION,
-                    'build_date': BUILD_DATE,
-                    'features': FEATURES,
-                    'configuration': {
-                        'user_agent': monitor.headers['User-Agent'],
-                        'days_back': days_back,
-                        'max_filings': max_filings,
-                        'min_confidence': min_confidence,
-                        'debug_mode': debug_mode
-                    },
-                    'endpoints': {
-                        'bulk_data_base': monitor.bulk_data_base,
-                        'company_tickers': monitor.company_tickers_url,
-                        'submissions_api': monitor.submissions_api
-                    },
-                    'processing': {
-                        'request_delay': monitor.request_delay,
-                        'max_retries': monitor.max_retries,
-                        'max_workers': 5
-                    },
-                    'keyword_categories': {
-                        'primary': len(monitor.cyber_keywords['primary']),
-                        'secondary': len(monitor.cyber_keywords['secondary']),
-                        'technical': len(monitor.cyber_keywords['technical']),
-                        'total_keywords': sum(len(v) for v in monitor.cyber_keywords.values())
-                    }
-                }
-                st.json(debug_info)
-        
-        # Run the bulk scan
-        with st.spinner(f"Scanning SEC bulk data for {days_back} days, up to {max_filings} filings..."):
-            incidents = monitor.monitor_cybersecurity_incidents_bulk(days_back, max_filings)
-        
-        # Show debug information if enabled
-        if debug_mode:
-            st.header("🔗 SEC API Communication Log")
-            api_log = monitor.get_api_communication_log()
-            if not api_log.empty:
-                st.dataframe(api_log, use_container_width=True)
-                
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total API Calls", len(api_log))
-                with col2:
-                    success_rate = len(api_log[api_log['Status Code'] == 200]) / len(api_log) * 100
-                    st.metric("Success Rate", f"{success_rate:.1f}%")
-                with col3:
-                    total_data = api_log['Content Length'].sum()
-                    st.metric("Total Data", f"{total_data:,} bytes")
-                with col4:
-                    avg_time = api_log['Response Time (s)'].mean()
-                    st.metric("Avg Response Time", f"{avg_time:.2f}s")
-            else:
-                st.info("No API calls recorded")
-            
-            st.header("📋 System Logs")
-            logs = streamlit_handler.get_logs()
-            if logs:
-                st.text_area("Debug Logs", logs, height=300)
-            else:
-                st.info("No system logs generated")
-        
-        # Filter incidents by confidence
-        high_confidence_incidents = [i for i in incidents if i.confidence_score >= min_confidence]
-        total_incidents = len(incidents)
-        
-        # Extract Item 1.05 filing stats from logs for metrics
-        if debug_mode:
-            logs = streamlit_handler.get_logs()
-            item_105_match = re.search(r'Found (\d+) Item 1\.05 cybersecurity filings', logs)
-            
-            if item_105_match:
-                st.header("🎯 Item 1.05 Collection Summary")
-                
-                item_105_count = int(item_105_match.group(1))
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Item 1.05 Filings Found", item_105_count)
-                with col2:
-                    st.metric("Detailed Analysis Done", len(high_confidence_incidents) + len(incidents) - len(high_confidence_incidents))
-                with col3:
-                    if item_105_count > 0:
-                        success_rate = (len(high_confidence_incidents) / item_105_count) * 100
-                        st.metric("Incident Confirmation Rate", f"{success_rate:.1f}%")
-                        
-                st.success(f"✅ **Efficiency Achievement:** This system ONLY collected and analyzed Item 1.05 cybersecurity filings, achieving 100% relevance compared to analyzing random 8-K filings.")
-        
-        # Display results summary
-        if incidents:
-            if len(high_confidence_incidents) > 0:
-                st.success(f"🚨 CYBERSECURITY INCIDENTS DETECTED: {len(high_confidence_incidents)} high-confidence incidents found!")
-            else:
-                st.info(f"📊 Found {total_incidents} Item 1.05 cybersecurity filings, but none met the confidence threshold of {min_confidence:.1f}")
-                st.markdown("💡 **Try lowering the confidence threshold to see more results.**")
-        else:
-            st.info(f"📊 No Item 1.05 cybersecurity filings found in the last {days_back} days.")
-            st.markdown("🔍 **This means no companies filed cybersecurity incident reports during this period - which is actually normal, as these incidents are relatively rare.**")
         # Show detailed results if incidents found
         if high_confidence_incidents:
             st.header("🚨 STRICT Cybersecurity Incidents")
@@ -1380,111 +1188,108 @@ def main():
                         st.write(f"**Filing URL:** {incident.filing_url}")
         
         else:
-            st.info(f"No STRICT cybersecurity incidents detected in the last {days_back} days.")
-            if debug_mode:
-                st.markdown("**🔧 Troubleshooting:**")
-                st.markdown("- Check the debug logs above to see what 8-K filings were found")  
-                st.markdown("- Verify if any contained Item 1.05 sections")
-                st.markdown("- STRICT mode requires cybersecurity incidents as PRIMARY purpose")
-                st.markdown("- Consider that actual cybersecurity incidents are rare events")
+            st.info(f"
+            
+        except Exception as e:
+            logger.error(f"RSS fallback failed: {e}")
+            return []
     
-    # Footer with version info
-    st.markdown("---")
-    st.markdown(f"**SEC 8-K Cybersecurity Monitor v{VERSION}** | STRICT Mode | Built: {BUILD_DATE}")
-
-if __name__ == "__main__":
-    main()
-            st.header("🚨 Cybersecurity Incidents Detected")
-            
-            # Summary metrics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("High Confidence", len(high_confidence_incidents))
-            with col2:
-                st.metric("Total Detections", total_incidents)
-            with col3:
-                if high_confidence_incidents:
-                    avg_confidence = sum(i.confidence_score for i in high_confidence_incidents) / len(high_confidence_incidents)
-                    st.metric("Avg Confidence", f"{avg_confidence:.2f}")
-                else:
-                    st.metric("Avg Confidence", "0.00")
-            with col4:
-                unique_companies = len(set(i.company_name for i in high_confidence_incidents))
-                st.metric("Unique Companies", unique_companies)
-            
-            # Incidents table
-            incidents_data = []
-            for incident in high_confidence_incidents:
-                incidents_data.append({
-                    "Company": incident.company_name,
-                    "Ticker": incident.ticker if incident.ticker else "N/A",
-                    "Filing Date": incident.filing_date,
-                    "Confidence": f"{incident.confidence_score:.2f}",
-                    "Keywords Found": len(incident.keywords),
-                    "Top Keywords": ", ".join(incident.keywords[:3]) + ("..." if len(incident.keywords) > 3 else "")
-                })
-            
-            if incidents_data:
-                df = pd.DataFrame(incidents_data)
-                st.dataframe(df, use_container_width=True)
-            
-            # Detailed incident analysis
-            st.subheader("📋 Detailed Incident Analysis")
-            for i, incident in enumerate(high_confidence_incidents):
-                with st.expander(f"#{i+1}: {incident.company_name} ({incident.ticker or 'No ticker'}) - Confidence: {incident.confidence_score:.2f}"):
-                    col1, col2 = st.columns([2, 1])
-                    
-                    with col1:
-                        st.markdown("**📝 Incident Description:**")
-                        st.write(incident.incident_description)
-                        
-                        st.markdown("**🔗 SEC Filing:**")
-                        st.link_button("View Original 8-K Filing", incident.filing_url)
-                        
-                        if debug_mode and incident.raw_content_preview:
-                            st.markdown("**🐛 Raw Content Preview:**")
-                            st.text_area(f"Raw content preview #{i+1}", incident.raw_content_preview, height=100)
-                    
-                    with col2:
-                        st.markdown("**📊 Incident Metadata:**")
-                        incident_metadata = {
-                            "Company": incident.company_name,
-                            "Ticker": incident.ticker or "Unknown",
-                            "CIK": incident.cik,
-                            "Filing Date": incident.filing_date,
-                            "Incident Date": incident.incident_date or "Not specified",
-                            "Filing Type": incident.filing_type,
-                            "Confidence Score": round(incident.confidence_score, 3),
-                            "Keywords Found": incident.keywords,
-                            "Keyword Count": len(incident.keywords)
-                        }
-                        st.json(incident_metadata)
+    def get_daily_index_filings(self, target_date: datetime, cik_to_ticker: Dict[str, str]) -> List[Dict]:
+        """Get 8-K filings from SEC daily index for specific date"""
         
-        elif total_incidents > 0:
-            st.info(f"Found {total_incidents} potential incidents, but none met the confidence threshold of {min_confidence:.1f}")
-            st.markdown("**💡 Try lowering the confidence threshold in the sidebar to see more results.**")
-            
-            if debug_mode:
-                st.subheader("🔍 Low-Confidence Detections (Debug Only)")
-                low_confidence_incidents = [i for i in incidents if i.confidence_score < min_confidence]
-                for i, incident in enumerate(low_confidence_incidents[:5]):  # Show max 5
-                    with st.expander(f"Low-conf #{i+1}: {incident.company_name} - Confidence: {incident.confidence_score:.2f}"):
-                        st.write(f"**Keywords:** {', '.join(incident.keywords)}")
-                        st.write(f"**Description Preview:** {incident.incident_description[:200]}...")
-                        st.write(f"**Filing URL:** {incident.filing_url}")
+        # SEC daily index URL format
+        year = target_date.year
+        quarter = f"QTR{(target_date.month - 1) // 3 + 1}"
+        date_str = target_date.strftime('%Y%m%d')
         
-        else:
-            st.info(f"No cybersecurity incidents detected in the analyzed filings.")
-            if debug_mode:
-                st.markdown("**🔧 Troubleshooting:**")
-                st.markdown("- Check the API Communication Log above for failed requests")  
-                st.markdown("- Verify the date range covers recent activity")
-                st.markdown("- Consider that cybersecurity incidents are relatively rare")
-                st.markdown("- Try increasing the monitoring period or lowering confidence threshold")
+        # Try both form.idx and master.idx formats
+        index_urls = [
+            f"{self.bulk_data_base}/{year}/{quarter}/form.{date_str}.idx",
+            f"{self.bulk_data_base}/{year}/{quarter}/master.{date_str}.idx"
+        ]
+        
+        for index_url in index_urls:
+            logger.debug(f"Trying daily index: {index_url}")
+            
+            response = self._make_request(index_url)
+            if response:
+                filings = self.parse_daily_index(response.text, target_date, cik_to_ticker)
+                if filings:
+                    return filings
+        
+        logger.debug(f"No daily index found for {target_date.strftime('%Y-%m-%d')}")
+        return []
     
-    # Footer with version info
-    st.markdown("---")
-    st.markdown(f"**SEC 8-K Cybersecurity Monitor v{VERSION}** | Built: {BUILD_DATE} | Bulk Data Capability")
-
-if __name__ == "__main__":
-    main()
+    def parse_daily_index(self, index_content: str, filing_date: datetime, cik_to_ticker: Dict[str, str]) -> List[Dict]:
+        """Parse SEC daily index file to extract 8-K filings"""
+        
+        filings = []
+        lines = index_content.split('\n')
+        
+        logger.debug(f"Parsing index file with {len(lines)} lines")
+        
+        # Log first few lines to understand format
+        if self.debug_mode and len(lines) > 10:
+            logger.debug("First 10 lines of index file:")
+            for i, line in enumerate(lines[:10]):
+                logger.debug(f"Line {i}: {line}")
+        
+        # Look for different possible formats
+        data_started = False
+        found_8k_count = 0
+        
+        for line_num, line in enumerate(lines):
+            original_line = line
+            line = line.strip()
+            
+            # Skip empty lines
+            if not line:
+                continue
+            
+            # Skip header lines (usually first 10-15 lines)
+            if line_num < 15 and any(header in line.upper() for header in ['FORM TYPE', 'COMPANY NAME', 'CIK', 'DATE FILED', 'FILE NAME', '----']):
+                continue
+                
+            # Check if this looks like a data line
+            # Format can be: pipe-delimited OR space-delimited OR tab-delimited
+            
+            # Try pipe-delimited first (most common)
+            if '|' in line:
+                parts = [part.strip() for part in line.split('|')]
+                if len(parts) >= 4:
+                    form_type = parts[0]
+                    if form_type.upper() in ['8-K', '8-K/A']:
+                        found_8k_count += 1
+                        filing = self._parse_pipe_delimited_line(parts, filing_date, cik_to_ticker)
+                        if filing:
+                            filings.append(filing)
+                            
+            # Try space/tab delimited format
+            elif any(form in line.upper() for form in ['8-K ', '8-K\t']):
+                # Split on multiple spaces or tabs
+                parts = re.split(r'\s{2,}|\t+', line)
+                if len(parts) >= 4:
+                    found_8k_count += 1
+                    filing = self._parse_space_delimited_line(parts, filing_date, cik_to_ticker)
+                    if filing:
+                        filings.append(filing)
+                        
+            # Try fixed-width format (sometimes used)
+            elif line.upper().startswith('8-K') or '8-K' in line[:20]:
+                found_8k_count += 1
+                filing = self._parse_fixed_width_line(line, filing_date, cik_to_ticker)
+                if filing:
+                    filings.append(filing)
+        
+        logger.debug(f"Found {found_8k_count} potential 8-K lines, parsed {len(filings)} valid filings")
+        
+        # If we found 8-K mentions but no valid filings, log some examples
+        if found_8k_count > 0 and len(filings) == 0 and self.debug_mode:
+            logger.debug("Found 8-K mentions but no valid filings. Sample lines with 8-K:")
+            count = 0
+            for line in lines:
+                if '8-K' in line.upper() and count < 3:
+                    logger.debug(f"Sample 8-K line: {line}")
+                    count += 1
+        
+        return filings
